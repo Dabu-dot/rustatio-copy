@@ -34,7 +34,7 @@ backend = "aqua:jdx/hk"
 "platforms.windows-x64" = { checksum = "sha256:1f12218ccad806a3f49bcf521f86b6825fbd89486e830c1c04f72e3796f84589", url = "https://github.com/jdx/hk/releases/download/v1.36.0/hk-x86_64-pc-windows-msvc.zip"}
 
 [[tools.node]]
-version = "22.22.0"
+version = "25.7.0"
 backend = "core:node"
 
 [[tools.pkl]]
@@ -45,10 +45,6 @@ backend = "aqua:apple/pkl"
 "platforms.macos-arm64" = { checksum = "sha256:f1db44c0f6f859aee88c9d7d272f2371ae40ac95ec9957ae78eff51665158e04", url = "https://github.com/apple/pkl/releases/download/0.30.2/pkl-macos-aarch64"}
 "platforms.macos-x64" = { checksum = "sha256:5f62ae7a7a34c15b3a83af17bda8e6b98516953f383a492340d4aa090caaa6d9", url = "https://github.com/apple/pkl/releases/download/0.30.2/pkl-macos-amd64"}
 "platforms.windows-x64" = { checksum = "sha256:19e92aa59bcf4e54963b6e3b419af7e1b939f5793b44f4a08d60bab1217106f4", url = "https://github.com/apple/pkl/releases/download/0.30.2/pkl-windows-amd64.exe"}
-
-[[tools.prettier]]
-version = "3.8.1"
-backend = "npm:prettier"
 
 [[tools.rust]]
 version = "1.93.1"
