@@ -2,8 +2,8 @@ use super::events::{EventBroadcaster, InstanceEvent, LogEvent};
 use super::instance::{FakerInstance, InstanceInfo};
 use super::lifecycle::InstanceLifecycle;
 use super::persistence::{
-    now_timestamp, CustomPreset, DefaultPreset, InstanceSource, MaxActiveSettings, PersistedInstance,
-    PersistedRuntime, PersistedState, Persistence, WatchSettings,
+    now_timestamp, CustomPreset, DefaultPreset, InstanceSource, MaxActiveSettings,
+    PersistedInstance, PersistedRuntime, PersistedState, Persistence, WatchSettings,
 };
 use rustatio_core::logger::set_instance_context_str;
 use rustatio_core::{

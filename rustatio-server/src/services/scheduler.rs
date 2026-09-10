@@ -178,12 +178,11 @@ async fn manage_max_active_and_queue(
         let mut rng = rand::rng();
 
         if settings.global_max_active_enabled {
-            if let (Some(min_val), Some(max_val)) = (settings.global_min_active, settings.global_max_active) {
-                let limit = if min_val < max_val {
-                    rng.random_range(min_val..=max_val)
-                } else {
-                    min_val
-                };
+            if let (Some(min_val), Some(max_val)) =
+                (settings.global_min_active, settings.global_max_active)
+            {
+                let limit =
+                    if min_val < max_val { rng.random_range(min_val..=max_val) } else { min_val };
                 settings.current_effective_global_limit = Some(limit);
             }
         } else {
@@ -226,12 +225,7 @@ async fn manage_max_active_and_queue(
                 let stats = inst.faker.stats_snapshot();
                 let tracker_host = primary_tracker_host(&inst.summary.announce).unwrap_or_default();
                 let is_paused = matches!(stats.state, FakerState::Paused);
-                InstanceStateInfo {
-                    id: id.clone(),
-                    state: stats.state,
-                    tracker_host,
-                    is_paused,
-                }
+                InstanceStateInfo { id: id.clone(), state: stats.state, tracker_host, is_paused }
             })
             .collect()
     };
@@ -265,8 +259,11 @@ async fn manage_max_active_and_queue(
     let eligible_candidates: Vec<&InstanceStateInfo> = candidates_to_start
         .into_iter()
         .filter(|item| {
-            if let Some(&tr_limit) = settings.current_effective_tracker_limits.get(&item.tracker_host) {
-                let current_tr_running = running_by_tracker.get(&item.tracker_host).copied().unwrap_or(0);
+            if let Some(&tr_limit) =
+                settings.current_effective_tracker_limits.get(&item.tracker_host)
+            {
+                let current_tr_running =
+                    running_by_tracker.get(&item.tracker_host).copied().unwrap_or(0);
                 if current_tr_running >= tr_limit {
                     return false;
                 }
@@ -286,10 +283,7 @@ async fn manage_max_active_and_queue(
         eligible_candidates[idx].id.clone()
     };
 
-    tracing::info!(
-        "Queue scheduler: Starting next queued instance {}",
-        selected_id
-    );
+    tracing::info!("Queue scheduler: Starting next queued instance {}", selected_id);
 
     if let Err(e) = state.start_instance(&selected_id).await {
         tracing::warn!("Queue scheduler: Failed to start instance {}: {}", selected_id, e);
@@ -330,14 +324,8 @@ mod tests {
         let state = AppState::new(&temp.path().to_string_lossy());
 
         // Create 2 instances
-        state
-            .create_instance("inst-1", sample_torrent(1), FakerConfig::default())
-            .await
-            .unwrap();
-        state
-            .create_instance("inst-2", sample_torrent(2), FakerConfig::default())
-            .await
-            .unwrap();
+        state.create_instance("inst-1", sample_torrent(1), FakerConfig::default()).await.unwrap();
+        state.create_instance("inst-2", sample_torrent(2), FakerConfig::default()).await.unwrap();
 
         // Enable global max active = 1
         let mut settings = MaxActiveSettings::default();
@@ -353,10 +341,8 @@ mod tests {
         let changed = manage_max_active_and_queue(&state, &instances_map).await;
         assert!(changed);
 
-        let effective_limit = state
-            .get_max_active_settings()
-            .await
-            .and_then(|s| s.current_effective_global_limit);
+        let effective_limit =
+            state.get_max_active_settings().await.and_then(|s| s.current_effective_global_limit);
         assert_eq!(effective_limit, Some(1));
     }
 }
