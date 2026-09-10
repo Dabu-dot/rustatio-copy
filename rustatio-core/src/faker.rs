@@ -126,6 +126,45 @@ pub struct FakerConfig {
     /// What to do when stop conditions are met
     #[serde(default)]
     pub post_stop_action: PostStopAction,
+
+    // Scrape-based start conditions
+    /// Start/Resume when tracker leechers count is strictly greater than this value
+    #[serde(default)]
+    pub start_when_leechers_above: Option<i64>,
+
+    /// Start/Resume when tracker seeders count is strictly greater than this value
+    #[serde(default)]
+    pub start_when_seeders_above: Option<i64>,
+
+    // Cyclic / Interval Scheduling
+    #[serde(default)]
+    pub cyclic_enabled: bool,
+
+    #[serde(default = "default_cyclic_active_duration")]
+    pub min_active_duration: u64, // in seconds
+
+    #[serde(default = "default_cyclic_active_duration")]
+    pub max_active_duration: u64, // in seconds
+
+    #[serde(default = "default_cyclic_inactive_duration")]
+    pub min_inactive_duration: u64, // in seconds
+
+    #[serde(default = "default_cyclic_inactive_duration")]
+    pub max_inactive_duration: u64, // in seconds
+
+    #[serde(default = "default_true")]
+    pub reset_session_counters_on_cycle: bool,
+
+    #[serde(default)]
+    pub inactive_mode: InactiveMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InactiveMode {
+    #[default]
+    Idle,
+    Stopped,
 }
 
 /// UI-friendly preset settings format (matches frontend)
@@ -161,6 +200,19 @@ pub struct PresetSettings {
     pub target_upload_rate: Option<f64>,
     pub target_download_rate: Option<f64>,
     pub progressive_duration_hours: Option<f64>,
+    // Scrape-based start conditions
+    pub start_when_leechers_above_enabled: Option<bool>,
+    pub start_when_leechers_above: Option<i64>,
+    pub start_when_seeders_above_enabled: Option<bool>,
+    pub start_when_seeders_above: Option<i64>,
+    // Cyclic interval scheduling
+    pub cyclic_enabled: Option<bool>,
+    pub min_active_duration_hours: Option<f64>,
+    pub max_active_duration_hours: Option<f64>,
+    pub min_inactive_duration_hours: Option<f64>,
+    pub max_inactive_duration_hours: Option<f64>,
+    pub reset_session_counters_on_cycle: Option<bool>,
+    pub inactive_mode: Option<InactiveMode>,
 }
 
 impl From<PresetSettings> for FakerConfig {
@@ -185,6 +237,23 @@ impl From<PresetSettings> for FakerConfig {
         } else {
             None
         };
+
+        let start_when_leechers_above = if p.start_when_leechers_above_enabled.unwrap_or(false) {
+            p.start_when_leechers_above
+        } else {
+            None
+        };
+
+        let start_when_seeders_above = if p.start_when_seeders_above_enabled.unwrap_or(false) {
+            p.start_when_seeders_above
+        } else {
+            None
+        };
+
+        let min_active = (p.min_active_duration_hours.unwrap_or(4.0) * 3600.0) as u64;
+        let max_active = (p.max_active_duration_hours.unwrap_or(4.0) * 3600.0) as u64;
+        let min_inactive = (p.min_inactive_duration_hours.unwrap_or(2.0) * 3600.0) as u64;
+        let max_inactive = (p.max_inactive_duration_hours.unwrap_or(2.0) * 3600.0) as u64;
 
         Self {
             upload_rate: p.upload_rate.unwrap_or(50.0),
@@ -218,8 +287,29 @@ impl From<PresetSettings> for FakerConfig {
             target_upload_rate: p.target_upload_rate,
             target_download_rate: p.target_download_rate,
             progressive_duration: (p.progressive_duration_hours.unwrap_or(1.0) * 3600.0) as u64,
+            start_when_leechers_above,
+            start_when_seeders_above,
+            cyclic_enabled: p.cyclic_enabled.unwrap_or(false),
+            min_active_duration: min_active,
+            max_active_duration: max_active.max(min_active),
+            min_inactive_duration: min_inactive,
+            max_inactive_duration: max_inactive.max(min_inactive),
+            reset_session_counters_on_cycle: p.reset_session_counters_on_cycle.unwrap_or(true),
+            inactive_mode: p.inactive_mode.unwrap_or_default(),
         }
     }
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_cyclic_active_duration() -> u64 {
+    14400 // 4 hours
+}
+
+const fn default_cyclic_inactive_duration() -> u64 {
+    7200 // 2 hours
 }
 
 const fn default_randomize_rates() -> bool {
@@ -272,6 +362,15 @@ impl Default for FakerConfig {
             target_download_rate: None,
             progressive_duration: 3600,
             post_stop_action: PostStopAction::Idle,
+            start_when_leechers_above: None,
+            start_when_seeders_above: None,
+            cyclic_enabled: false,
+            min_active_duration: 14400,
+            max_active_duration: 14400,
+            min_inactive_duration: 7200,
+            max_inactive_duration: 7200,
+            reset_session_counters_on_cycle: true,
+            inactive_mode: InactiveMode::Idle,
         }
     }
 }
@@ -360,6 +459,12 @@ pub struct FakerStats {
     #[serde(default)]
     pub post_stop_action: PostStopAction,
 
+    // === CYCLIC SCHEDULING STATE ===
+    #[serde(default)]
+    pub is_cyclic_inactive: bool,
+    #[serde(default)]
+    pub cyclic_next_switch_ms: Option<u64>,
+
     // === INTERNAL ===
     #[serde(skip)]
     pub last_announce: Option<Instant>,
@@ -385,6 +490,10 @@ pub struct RatioFaker {
     start_time: Instant,
     last_update: Instant,
     announce_interval: Duration,
+
+    // Cyclic
+    cyclic_phase_start_ms: u64,
+    cyclic_phase_duration_secs: u64,
 
     // Scrape
     last_scrape: Instant,
@@ -619,6 +728,19 @@ impl RatioFaker {
         let torrent_downloaded = (torrent.total_size as f64 * completion) as u64;
         let left = torrent.total_size.saturating_sub(torrent_downloaded);
 
+        let now_ms = Self::current_timestamp_millis();
+        let (is_cyclic_inactive, cyclic_next_switch_ms, phase_duration) = if config.cyclic_enabled {
+            let mut rng = rand::rng();
+            let duration = if config.min_active_duration < config.max_active_duration {
+                rng.random_range(config.min_active_duration..=config.max_active_duration)
+            } else {
+                config.min_active_duration
+            };
+            (false, Some(now_ms.saturating_add(duration.saturating_mul(1000))), duration)
+        } else {
+            (false, None, 0)
+        };
+
         let stats = FakerStats {
             // Cumulative stats from previous sessions
             uploaded: config.initial_uploaded,
@@ -687,6 +809,9 @@ impl RatioFaker {
 
             stop_condition_met: false,
             post_stop_action: config.post_stop_action,
+
+            is_cyclic_inactive,
+            cyclic_next_switch_ms,
         };
 
         Ok(Self {
@@ -700,6 +825,8 @@ impl RatioFaker {
             start_time: Instant::now(),
             last_update: Instant::now(),
             announce_interval: Duration::from_mins(30), // Default 30 minutes
+            cyclic_phase_start_ms: now_ms,
+            cyclic_phase_duration_secs: phase_duration,
             last_scrape: Instant::now(),
             scrape_supported: true,
         })
@@ -962,6 +1089,13 @@ impl RatioFaker {
             };
         }
 
+        let now_ms = Self::current_timestamp_millis();
+
+        // Check cyclic transitions first
+        if self.config.cyclic_enabled {
+            self.check_cyclic_transition(now_ms);
+        }
+
         if self.check_stop_conditions(&self.stats) {
             self.stats.current_upload_rate = 0.0;
             self.stats.current_download_rate = 0.0;
@@ -980,10 +1114,17 @@ impl RatioFaker {
         let (mut upload_rate, mut download_rate, is_idling, idling_reason) =
             Self::apply_idling_rules(&inputs, upload_rate, download_rate);
 
-        // Preserve idling state if stop condition was met with post_stop_action=Idle
-        let (is_idling, idling_reason) = if self.stats.stop_condition_met
-            && self.config.post_stop_action == PostStopAction::Idle
-        {
+        // Cyclic inactive handling
+        let (is_idling, idling_reason) = if self.stats.is_cyclic_inactive {
+            upload_rate = 0.0;
+            download_rate = 0.0;
+            if self.config.inactive_mode == InactiveMode::Idle {
+                (true, Some("cyclic_inactive".to_string()))
+            } else {
+                (false, None)
+            }
+        } else if self.stats.stop_condition_met && self.config.post_stop_action == PostStopAction::Idle {
+            // Preserve idling state if stop condition was met with post_stop_action=Idle
             upload_rate = 0.0;
             download_rate = 0.0;
             (true, Some("stop_condition_met".to_string()))
@@ -1189,6 +1330,19 @@ impl RatioFaker {
                     scrape_response.complete,
                     scrape_response.incomplete
                 );
+
+                if self.check_scrape_start_conditions() {
+                    if self.stats.stop_condition_met || matches!(self.stats.state, FakerState::Stopped) {
+                        log_info!(
+                            "Scrape start condition met (seeders={}, leechers={}), starting/resuming torrent: {}",
+                            self.stats.seeders,
+                            self.stats.leechers,
+                            self.torrent.name
+                        );
+                        self.reset_session_counters();
+                        let _ = self.resume();
+                    }
+                }
             }
             Err(e) => {
                 self.apply_tracker_error(e);
@@ -1336,6 +1490,8 @@ impl RatioFaker {
             announce_count: 0,
             stop_condition_met: false,
             post_stop_action: config.post_stop_action,
+            is_cyclic_inactive: false,
+            cyclic_next_switch_ms: None,
         }
     }
 
@@ -1572,6 +1728,98 @@ impl RatioFaker {
     }
 
     /// Get current timestamp in milliseconds (cross-platform)
+    pub fn check_scrape_start_conditions(&self) -> bool {
+        let leechers_condition = self
+            .config
+            .start_when_leechers_above
+            .is_some_and(|threshold| self.stats.leechers > threshold);
+
+        let seeders_condition = self
+            .config
+            .start_when_seeders_above
+            .is_some_and(|threshold| self.stats.seeders > threshold);
+
+        leechers_condition || seeders_condition
+    }
+
+    pub fn reset_session_counters(&mut self) {
+        log_info!("Resetting session counters for torrent: {}", self.torrent.name);
+        self.stats.session_uploaded = 0;
+        self.stats.session_downloaded = 0;
+        self.stats.session_ratio = 0.0;
+        self.stats.elapsed_time = Duration::from_secs(0);
+        self.stats.upload_progress = 0.0;
+        self.stats.download_progress = 0.0;
+        self.stats.seed_time_progress = 0.0;
+        self.stats.stop_condition_met = false;
+        self.start_time = Instant::now();
+        self.last_update = Instant::now();
+    }
+
+    fn check_cyclic_transition(&mut self, now_ms: u64) -> bool {
+        if !self.config.cyclic_enabled {
+            return false;
+        }
+
+        let switch_at = self.stats.cyclic_next_switch_ms.unwrap_or(0);
+        if now_ms < switch_at {
+            return false;
+        }
+
+        let mut rng = rand::rng();
+        if self.stats.is_cyclic_inactive {
+            // Transition from inactive to active
+            let active_dur = if self.config.min_active_duration < self.config.max_active_duration {
+                rng.random_range(self.config.min_active_duration..=self.config.max_active_duration)
+            } else {
+                self.config.min_active_duration
+            };
+
+            log_info!(
+                "Cyclic interval: transitioning to active phase for {}s (torrent: {})",
+                active_dur,
+                self.torrent.name
+            );
+
+            self.stats.is_cyclic_inactive = false;
+            self.cyclic_phase_start_ms = now_ms;
+            self.cyclic_phase_duration_secs = active_dur;
+            self.stats.cyclic_next_switch_ms =
+                Some(now_ms.saturating_add(active_dur.saturating_mul(1000)));
+
+            if self.config.reset_session_counters_on_cycle {
+                self.reset_session_counters();
+            }
+
+            if matches!(self.stats.state, FakerState::Stopped | FakerState::Paused) {
+                let _ = self.resume();
+            }
+        } else {
+            // Transition from active to inactive
+            let inactive_dur = if self.config.min_inactive_duration < self.config.max_inactive_duration
+            {
+                rng.random_range(self.config.min_inactive_duration..=self.config.max_inactive_duration)
+            } else {
+                self.config.min_inactive_duration
+            };
+
+            log_info!(
+                "Cyclic interval: transitioning to inactive phase ({:?}) for {}s (torrent: {})",
+                self.config.inactive_mode,
+                inactive_dur,
+                self.torrent.name
+            );
+
+            self.stats.is_cyclic_inactive = true;
+            self.cyclic_phase_start_ms = now_ms;
+            self.cyclic_phase_duration_secs = inactive_dur;
+            self.stats.cyclic_next_switch_ms =
+                Some(now_ms.saturating_add(inactive_dur.saturating_mul(1000)));
+        }
+
+        true
+    }
+
     fn check_stop_conditions(&self, stats: &FakerStats) -> bool {
         // Don't re-trigger if already met
         if stats.stop_condition_met {
@@ -2619,6 +2867,106 @@ mod tests {
         assert!(matches!(faker.stats.state, FakerState::Paused));
         assert_eq!(faker.stats.current_upload_rate, 0.0);
         assert_eq!(faker.stats.current_download_rate, 0.0);
+    }
+
+    #[test]
+    fn test_scrape_start_conditions_resumes_stopped_torrent() {
+        let torrent = Arc::new(TorrentInfo {
+            info_hash: [25u8; 20],
+            announce: "https://tracker.test/announce".to_string(),
+            announce_list: None,
+            name: "sample".to_string(),
+            total_size: 1024,
+            piece_length: 256,
+            num_pieces: 4,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            is_single_file: true,
+            file_count: 1,
+            files: Vec::new(),
+        });
+
+        let faker = RatioFaker::new(
+            torrent,
+            FakerConfig {
+                start_when_leechers_above: Some(5),
+                ..FakerConfig::default()
+            },
+            None,
+        );
+        assert!(faker.is_ok());
+        let mut faker = faker.unwrap();
+
+        faker.stats.state = FakerState::Stopped;
+        faker.stats.stop_condition_met = true;
+        faker.stats.session_uploaded = 500;
+
+        let scrape_resp = Ok(crate::protocol::ScrapeResponse {
+            complete: 10,
+            incomplete: 10,
+            downloaded: 0,
+            name: None,
+        });
+
+        faker.apply_scrape_result(&scrape_resp, Instant::now());
+
+        assert!(matches!(faker.stats.state, FakerState::Running));
+        assert!(!faker.stats.stop_condition_met);
+        assert_eq!(faker.stats.session_uploaded, 0);
+    }
+
+    #[test]
+    fn test_cyclic_scheduling_transitions() {
+        let torrent = Arc::new(TorrentInfo {
+            info_hash: [26u8; 20],
+            announce: "https://tracker.test/announce".to_string(),
+            announce_list: None,
+            name: "sample".to_string(),
+            total_size: 1024,
+            piece_length: 256,
+            num_pieces: 4,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            is_single_file: true,
+            file_count: 1,
+            files: Vec::new(),
+        });
+
+        let faker = RatioFaker::new(
+            torrent,
+            FakerConfig {
+                cyclic_enabled: true,
+                min_active_duration: 10,
+                max_active_duration: 10,
+                min_inactive_duration: 5,
+                max_inactive_duration: 5,
+                reset_session_counters_on_cycle: true,
+                inactive_mode: InactiveMode::Idle,
+                ..FakerConfig::default()
+            },
+            None,
+        );
+        assert!(faker.is_ok());
+        let mut faker = faker.unwrap();
+
+        assert!(!faker.stats.is_cyclic_inactive);
+        let initial_switch_ms = faker.stats.cyclic_next_switch_ms.unwrap();
+
+        // Advance time past switch_ms and tick
+        faker.stats.session_uploaded = 1000;
+        let _ = faker.check_cyclic_transition(initial_switch_ms + 1);
+
+        assert!(faker.stats.is_cyclic_inactive);
+        let next_switch_ms = faker.stats.cyclic_next_switch_ms.unwrap();
+        assert_eq!(next_switch_ms, initial_switch_ms + 1 + 5000);
+
+        // Advance time again past next_switch_ms
+        let _ = faker.check_cyclic_transition(next_switch_ms + 1);
+
+        assert!(!faker.stats.is_cyclic_inactive);
+        assert_eq!(faker.stats.session_uploaded, 0); // Reset on active transition
     }
 
     #[test]

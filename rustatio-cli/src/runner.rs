@@ -304,6 +304,7 @@ pub fn create_faker_config(config: &RunnerConfig) -> FakerConfig {
         target_upload_rate: config.target_upload,
         target_download_rate: config.target_download,
         progressive_duration: (config.progressive_duration * 3600.0) as u64,
+        ..FakerConfig::default()
     }
 }
 

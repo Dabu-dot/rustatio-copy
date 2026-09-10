@@ -18,6 +18,17 @@
     idleWhenNoLeechers,
     idleWhenNoSeeders,
     postStopAction,
+    startWhenLeechersAboveEnabled,
+    startWhenLeechersAbove,
+    startWhenSeedersAboveEnabled,
+    startWhenSeedersAbove,
+    cyclicEnabled,
+    minActiveDurationHours,
+    maxActiveDurationHours,
+    minInactiveDurationHours,
+    maxInactiveDurationHours,
+    resetSessionCountersOnCycle,
+    inactiveMode,
     completionPercent = 100,
     isRunning,
     onUpdate,
@@ -37,6 +48,17 @@
   let localIdleWhenNoLeechers = $state(false);
   let localIdleWhenNoSeeders = $state(false);
   let localPostStopAction = $state('idle');
+  let localStartWhenLeechersAboveEnabled = $state(false);
+  let localStartWhenLeechersAbove = $state(0);
+  let localStartWhenSeedersAboveEnabled = $state(false);
+  let localStartWhenSeedersAbove = $state(0);
+  let localCyclicEnabled = $state(false);
+  let localMinActiveDurationHours = $state(4);
+  let localMaxActiveDurationHours = $state(4);
+  let localMinInactiveDurationHours = $state(2);
+  let localMaxInactiveDurationHours = $state(2);
+  let localResetSessionCountersOnCycle = $state(true);
+  let localInactiveMode = $state('idle');
 
   // Track if we're currently editing to prevent external updates from interfering
   let isEditing = $state(false);
@@ -58,6 +80,17 @@
       localIdleWhenNoLeechers = idleWhenNoLeechers;
       localIdleWhenNoSeeders = idleWhenNoSeeders;
       localPostStopAction = postStopAction;
+      localStartWhenLeechersAboveEnabled = startWhenLeechersAboveEnabled;
+      localStartWhenLeechersAbove = startWhenLeechersAbove;
+      localStartWhenSeedersAboveEnabled = startWhenSeedersAboveEnabled;
+      localStartWhenSeedersAbove = startWhenSeedersAbove;
+      localCyclicEnabled = cyclicEnabled;
+      localMinActiveDurationHours = minActiveDurationHours;
+      localMaxActiveDurationHours = maxActiveDurationHours;
+      localMinInactiveDurationHours = minInactiveDurationHours;
+      localMaxInactiveDurationHours = maxInactiveDurationHours;
+      localResetSessionCountersOnCycle = resetSessionCountersOnCycle;
+      localInactiveMode = inactiveMode;
     }
   });
 
@@ -83,6 +116,9 @@
       localStopAtSeedTimeEnabled,
       localIdleWhenNoLeechers,
       localIdleWhenNoSeeders,
+      localStartWhenLeechersAboveEnabled,
+      localStartWhenSeedersAboveEnabled,
+      localCyclicEnabled,
     ].filter(Boolean).length
   );
 </script>
@@ -114,6 +150,17 @@
     bind:idleWhenNoLeechers={localIdleWhenNoLeechers}
     bind:idleWhenNoSeeders={localIdleWhenNoSeeders}
     bind:postStopAction={localPostStopAction}
+    bind:startWhenLeechersAboveEnabled={localStartWhenLeechersAboveEnabled}
+    bind:startWhenLeechersAbove={localStartWhenLeechersAbove}
+    bind:startWhenSeedersAboveEnabled={localStartWhenSeedersAboveEnabled}
+    bind:startWhenSeedersAbove={localStartWhenSeedersAbove}
+    bind:cyclicEnabled={localCyclicEnabled}
+    bind:minActiveDurationHours={localMinActiveDurationHours}
+    bind:maxActiveDurationHours={localMaxActiveDurationHours}
+    bind:minInactiveDurationHours={localMinInactiveDurationHours}
+    bind:maxInactiveDurationHours={localMaxInactiveDurationHours}
+    bind:resetSessionCountersOnCycle={localResetSessionCountersOnCycle}
+    bind:inactiveMode={localInactiveMode}
     {completionPercent}
     disabled={isRunning}
     onchange={updates => {

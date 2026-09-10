@@ -53,5 +53,18 @@ export function buildFakerConfig(instance, clientVersions = {}, opts = {}) {
       : null,
     progressive_duration: parseFloat(instance.progressiveDurationHours ?? 1) * 3600,
     scrape_interval: parseInt(instance.scrapeInterval ?? 60),
+    start_when_leechers_above: instance.startWhenLeechersAboveEnabled
+      ? parseInt(instance.startWhenLeechersAbove ?? 0)
+      : null,
+    start_when_seeders_above: instance.startWhenSeedersAboveEnabled
+      ? parseInt(instance.startWhenSeedersAbove ?? 0)
+      : null,
+    cyclic_enabled: instance.cyclicEnabled ?? false,
+    min_active_duration: parseFloat(instance.minActiveDurationHours ?? 4) * 3600,
+    max_active_duration: parseFloat(instance.maxActiveDurationHours ?? 4) * 3600,
+    min_inactive_duration: parseFloat(instance.minInactiveDurationHours ?? 2) * 3600,
+    max_inactive_duration: parseFloat(instance.maxInactiveDurationHours ?? 2) * 3600,
+    reset_session_counters_on_cycle: instance.resetSessionCountersOnCycle ?? true,
+    inactive_mode: instance.inactiveMode || 'idle',
   };
 }

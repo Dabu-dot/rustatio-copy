@@ -11,6 +11,8 @@
     Pause,
     Settings,
     Shuffle,
+    Play,
+    Repeat,
   } from '@lucide/svelte';
 
   let {
@@ -28,6 +30,17 @@
     idleWhenNoLeechers = $bindable(false),
     idleWhenNoSeeders = $bindable(false),
     postStopAction = $bindable('idle'),
+    startWhenLeechersAboveEnabled = $bindable(false),
+    startWhenLeechersAbove = $bindable(0),
+    startWhenSeedersAboveEnabled = $bindable(false),
+    startWhenSeedersAbove = $bindable(0),
+    cyclicEnabled = $bindable(false),
+    minActiveDurationHours = $bindable(4),
+    maxActiveDurationHours = $bindable(4),
+    minInactiveDurationHours = $bindable(2),
+    maxInactiveDurationHours = $bindable(2),
+    resetSessionCountersOnCycle = $bindable(true),
+    inactiveMode = $bindable('idle'),
     completionPercent = 100,
     disabled = false,
     onchange,
@@ -279,7 +292,11 @@
   </div>
 
   <!-- Idle when No Seeders -->
-  <div class="flex items-center gap-3 p-3 {idleWhenNoSeeders ? 'bg-primary/5' : ''}">
+  <div
+    class="flex items-center gap-3 p-3 border-b border-border {idleWhenNoSeeders
+      ? 'bg-primary/5'
+      : ''}"
+  >
     <Checkbox
       id="idle-no-seeders"
       checked={idleWhenNoSeeders}
@@ -305,6 +322,195 @@
       <span class="text-xs text-muted-foreground">disabled</span>
     {/if}
   </div>
+
+  <!-- Start when leechers above -->
+  <div
+    class="flex items-center gap-3 p-3 border-b border-border {startWhenLeechersAboveEnabled
+      ? 'bg-primary/5'
+      : ''}"
+  >
+    <Checkbox
+      id="start-leechers"
+      checked={startWhenLeechersAboveEnabled}
+      {disabled}
+      onchange={checked => {
+        startWhenLeechersAboveEnabled = checked;
+        onchange?.({ startWhenLeechersAboveEnabled: checked });
+      }}
+    />
+    <Play
+      size={16}
+      class={startWhenLeechersAboveEnabled ? 'text-green-500' : 'text-muted-foreground'}
+    />
+    <Label for="start-leechers" class="flex-1 cursor-pointer text-sm font-medium">
+      Start when leechers >
+    </Label>
+    {#if startWhenLeechersAboveEnabled}
+      <div class="flex items-center gap-1">
+        <Input
+          type="number"
+          bind:value={startWhenLeechersAbove}
+          {disabled}
+          min="0"
+          step="1"
+          class="w-20 h-8 text-center font-medium"
+          placeholder="0"
+          oninput={() => onchange?.({ startWhenLeechersAbove })}
+        />
+      </div>
+    {:else}
+      <span class="text-xs text-muted-foreground">disabled</span>
+    {/if}
+  </div>
+
+  <!-- Start when seeders above -->
+  <div
+    class="flex items-center gap-3 p-3 border-b border-border {startWhenSeedersAboveEnabled
+      ? 'bg-primary/5'
+      : ''}"
+  >
+    <Checkbox
+      id="start-seeders"
+      checked={startWhenSeedersAboveEnabled}
+      {disabled}
+      onchange={checked => {
+        startWhenSeedersAboveEnabled = checked;
+        onchange?.({ startWhenSeedersAboveEnabled: checked });
+      }}
+    />
+    <Play
+      size={16}
+      class={startWhenSeedersAboveEnabled ? 'text-green-500' : 'text-muted-foreground'}
+    />
+    <Label for="start-seeders" class="flex-1 cursor-pointer text-sm font-medium">
+      Start when seeders >
+    </Label>
+    {#if startWhenSeedersAboveEnabled}
+      <div class="flex items-center gap-1">
+        <Input
+          type="number"
+          bind:value={startWhenSeedersAbove}
+          {disabled}
+          min="0"
+          step="1"
+          class="w-20 h-8 text-center font-medium"
+          placeholder="0"
+          oninput={() => onchange?.({ startWhenSeedersAbove })}
+        />
+      </div>
+    {:else}
+      <span class="text-xs text-muted-foreground">disabled</span>
+    {/if}
+  </div>
+
+  <!-- Cyclic Interval Scheduling -->
+  <div
+    class="flex items-center gap-3 p-3 border-b border-border {cyclicEnabled ? 'bg-primary/5' : ''}"
+  >
+    <Checkbox
+      id="cyclic-enabled"
+      checked={cyclicEnabled}
+      {disabled}
+      onchange={checked => {
+        cyclicEnabled = checked;
+        onchange?.({ cyclicEnabled: checked });
+      }}
+    />
+    <Repeat size={16} class={cyclicEnabled ? 'text-blue-500' : 'text-muted-foreground'} />
+    <Label for="cyclic-enabled" class="flex-1 cursor-pointer text-sm font-medium">
+      Cyclic Interval Scheduling
+    </Label>
+    {#if !cyclicEnabled}
+      <span class="text-xs text-muted-foreground">disabled</span>
+    {/if}
+  </div>
+
+  {#if cyclicEnabled}
+    <div class="p-3 border-b border-border bg-muted/30 grid grid-cols-2 gap-3 text-xs">
+      <div>
+        <Label class="text-muted-foreground mb-1 block">Active Duration (hrs)</Label>
+        <div class="flex items-center gap-1">
+          <Input
+            type="number"
+            bind:value={minActiveDurationHours}
+            {disabled}
+            min="0.1"
+            step="0.1"
+            class="w-16 h-7 text-center font-medium"
+            placeholder="min"
+            oninput={() => onchange?.({ minActiveDurationHours })}
+          />
+          <span>-</span>
+          <Input
+            type="number"
+            bind:value={maxActiveDurationHours}
+            {disabled}
+            min="0.1"
+            step="0.1"
+            class="w-16 h-7 text-center font-medium"
+            placeholder="max"
+            oninput={() => onchange?.({ maxActiveDurationHours })}
+          />
+        </div>
+      </div>
+
+      <div>
+        <Label class="text-muted-foreground mb-1 block">Inactive Duration (hrs)</Label>
+        <div class="flex items-center gap-1">
+          <Input
+            type="number"
+            bind:value={minInactiveDurationHours}
+            {disabled}
+            min="0.1"
+            step="0.1"
+            class="w-16 h-7 text-center font-medium"
+            placeholder="min"
+            oninput={() => onchange?.({ minInactiveDurationHours })}
+          />
+          <span>-</span>
+          <Input
+            type="number"
+            bind:value={maxInactiveDurationHours}
+            {disabled}
+            min="0.1"
+            step="0.1"
+            class="w-16 h-7 text-center font-medium"
+            placeholder="max"
+            oninput={() => onchange?.({ maxInactiveDurationHours })}
+          />
+        </div>
+      </div>
+
+      <div class="col-span-2 flex items-center justify-between pt-2 border-t border-border">
+        <Label for="inactive-mode" class="text-muted-foreground">Inactive Mode</Label>
+        <select
+          id="inactive-mode"
+          bind:value={inactiveMode}
+          {disabled}
+          class="h-7 rounded-md border border-input bg-background px-2 text-xs font-medium focus:outline-none focus:ring-1 focus:ring-ring"
+          onchange={() => onchange?.({ inactiveMode })}
+        >
+          <option value="idle">Idle (0 KB/s announces for bonus points)</option>
+          <option value="stopped">Stopped (Send stopped announce)</option>
+        </select>
+      </div>
+
+      <div class="col-span-2 flex items-center gap-2 pt-1">
+        <Checkbox
+          id="reset-session-counters"
+          checked={resetSessionCountersOnCycle}
+          {disabled}
+          onchange={checked => {
+            resetSessionCountersOnCycle = checked;
+            onchange?.({ resetSessionCountersOnCycle: checked });
+          }}
+        />
+        <Label for="reset-session-counters" class="cursor-pointer text-muted-foreground">
+          Reset session counters on each cycle
+        </Label>
+      </div>
+    </div>
+  {/if}
 
   <!-- Post-Stop Action -->
   {#if hasThresholdCondition}

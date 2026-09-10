@@ -2,7 +2,7 @@ use super::events::{EventBroadcaster, InstanceEvent, LogEvent};
 use super::instance::{FakerInstance, InstanceInfo};
 use super::lifecycle::InstanceLifecycle;
 use super::persistence::{
-    now_timestamp, CustomPreset, DefaultPreset, InstanceSource, PersistedInstance,
+    now_timestamp, CustomPreset, DefaultPreset, InstanceSource, MaxActiveSettings, PersistedInstance,
     PersistedRuntime, PersistedState, Persistence, WatchSettings,
 };
 use rustatio_core::logger::set_instance_context_str;
@@ -29,6 +29,7 @@ pub struct AppState {
     default_preset: Arc<RwLock<Option<DefaultPreset>>>,
     watch_settings: Arc<RwLock<Option<WatchSettings>>>,
     custom_presets: Arc<RwLock<Vec<CustomPreset>>>,
+    max_active_settings: Arc<RwLock<Option<MaxActiveSettings>>>,
     http_client: reqwest::Client,
     forwarded_port: Arc<AtomicU16>,
     server_vpn_port_sync: bool,
@@ -78,6 +79,7 @@ impl AppState {
             default_preset: Arc::new(RwLock::new(None)),
             watch_settings: Arc::new(RwLock::new(None)),
             custom_presets: Arc::new(RwLock::new(Vec::new())),
+            max_active_settings: Arc::new(RwLock::new(None)),
             http_client: reqwest::Client::new(),
             forwarded_port: Arc::new(AtomicU16::new(0)),
             server_vpn_port_sync: std::env::var("VPN_PORT_SYNC").is_ok_and(|v| {
@@ -264,6 +266,15 @@ impl AppState {
         self.save_state().await
     }
 
+    pub async fn get_max_active_settings(&self) -> Option<MaxActiveSettings> {
+        self.max_active_settings.read().await.clone()
+    }
+
+    pub async fn set_max_active_settings(&self, settings: MaxActiveSettings) -> Result<(), String> {
+        *self.max_active_settings.write().await = Some(settings);
+        self.save_state().await
+    }
+
     pub async fn load_saved_state(&self) -> Result<usize, String> {
         let saved = self.persistence.load().await;
 
@@ -287,6 +298,11 @@ impl AppState {
                 "Restored {} custom preset(s) from saved state",
                 saved.custom_presets.len()
             );
+        }
+
+        if let Some(max_active) = saved.max_active_settings.clone() {
+            *self.max_active_settings.write().await = Some(max_active);
+            tracing::info!("Restored max active settings from saved state");
         }
 
         let mut restored_count = 0;
@@ -388,6 +404,7 @@ impl AppState {
         let default_preset = self.default_preset.read().await.clone();
         let watch_settings = self.watch_settings.read().await.clone();
         let custom_presets = self.custom_presets.read().await.clone();
+        let max_active_settings = self.max_active_settings.read().await.clone();
 
         let mut persisted = PersistedState {
             instances: HashMap::new(),
@@ -395,6 +412,7 @@ impl AppState {
             default_preset,
             watch_settings,
             custom_presets,
+            max_active_settings,
             version: 1,
         };
 
@@ -1130,6 +1148,8 @@ impl AppState {
             announce_count: runtime.announce_count,
             stop_condition_met: runtime.stop_condition_met,
             post_stop_action,
+            is_cyclic_inactive: false,
+            cyclic_next_switch_ms: None,
         }
     }
 }
