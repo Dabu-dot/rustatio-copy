@@ -1,4 +1,5 @@
 use super::instance::FakerInstance;
+use super::lifecycle::InstanceLifecycle;
 use super::state::AppState;
 use rustatio_core::logger::set_instance_context_str;
 use rustatio_core::{FakerState, RatioFakerHandle};
@@ -64,7 +65,13 @@ async fn scheduler_loop(
                 break;
             }
             () = tokio::time::sleep(update_interval) => {
-                update_all_running_instances(&instances).await;
+                let dirty = update_instances(&state, &instances).await;
+
+                if dirty {
+                    if let Err(e) = state.save_state().await {
+                        tracing::warn!("Scheduler: failed to save state after runtime change: {}", e);
+                    }
+                }
 
                 if last_save.elapsed() >= save_interval {
                     if let Err(e) = state.save_state().await {
@@ -79,22 +86,68 @@ async fn scheduler_loop(
     tracing::info!("Scheduler loop stopped");
 }
 
-async fn update_all_running_instances(instances: &Arc<RwLock<HashMap<String, FakerInstance>>>) {
-    // Collect running instance IDs and their faker handles
-    let running: Vec<(String, Arc<RatioFakerHandle>)> = {
+async fn update_instances(
+    state: &AppState,
+    instances: &Arc<RwLock<HashMap<String, FakerInstance>>>,
+) -> bool {
+    let items: Vec<(String, Arc<RatioFakerHandle>)> = {
         let guard = instances.read().await;
         guard.iter().map(|(id, inst)| (id.clone(), Arc::clone(&inst.faker))).collect()
     };
 
-    for (id, faker) in running {
-        let stats = faker.stats_snapshot();
-        if !matches!(stats.state, FakerState::Running) {
+    let mut dirty = false;
+
+    for (id, faker) in items {
+        let before = faker.stats_snapshot();
+        let should_update = matches!(before.state, FakerState::Running);
+        let should_retry = matches!(before.state, FakerState::Stopped)
+            && before.tracker_error.as_deref() == Some("Tracker unavailable")
+            && faker.tracker_retry_due_now().await;
+
+        if !should_update && !should_retry {
             continue;
         }
 
-        set_instance_context_str(Some(&id));
-        if let Err(e) = faker.update().await {
-            tracing::warn!("Scheduler: update failed for instance {}: {}", id, e);
+        let label = {
+            let guard = instances.read().await;
+            guard
+                .get(&id)
+                .map(|instance| instance.summary.name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| id.clone())
+        };
+        set_instance_context_str(Some(&label));
+        let result = if should_retry {
+            state.recover_tracker_instance(&id).await.map(|_| ())
+        } else {
+            faker.update().await.map_err(|e| e.to_string())
+        };
+        if let Err(e) = result {
+            let action = if should_retry { "tracker recovery" } else { "update" };
+            tracing::warn!("Scheduler: {} failed for instance {}: {}", action, id, e);
+            continue;
+        }
+
+        let after = faker.stats_snapshot();
+        {
+            let mut guard = instances.write().await;
+            if let Some(instance) = guard.get_mut(&id) {
+                instance.cumulative_uploaded = after.uploaded;
+                instance.cumulative_downloaded = after.downloaded;
+                instance.config.completion_percent = after.torrent_completion;
+            }
+        }
+
+        if std::mem::discriminant(&after.state) != std::mem::discriminant(&before.state)
+            || after.stop_condition_met != before.stop_condition_met
+            || after.is_idling != before.is_idling
+            || after.tracker_error != before.tracker_error
+            || after.tracker_retry_attempt != before.tracker_retry_attempt
+            || after.tracker_retry_at_ms != before.tracker_retry_at_ms
+        {
+            dirty = true;
         }
     }
+
+    dirty
 }

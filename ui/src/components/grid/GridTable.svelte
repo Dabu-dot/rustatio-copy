@@ -1,5 +1,7 @@
 <script>
   import { cn } from '$lib/utils.js';
+  import { getGridLivePeers, getGridLiveRate } from '$lib/gridMetrics.js';
+  import { getTrackerIssue } from '$lib/status.js';
   import ConfirmDialog from '../common/ConfirmDialog.svelte';
   import { selectedIds, gridActions, gridSort } from '$lib/gridStore.js';
   import TagBadge from './TagBadge.svelte';
@@ -16,6 +18,7 @@
     Trash2,
     Copy,
     Pencil,
+    AlertTriangle,
   } from '@lucide/svelte';
 
   let { data = [], oncontextaction = () => {} } = $props();
@@ -186,19 +189,29 @@
   function getStateColor(state) {
     switch (state?.toLowerCase()) {
       case 'starting':
+        return 'text-primary';
       case 'stopping':
-        return 'text-stat-ratio';
+        return 'text-stat-danger';
       case 'running':
         return 'text-stat-upload';
       case 'paused':
         return 'text-stat-ratio';
       case 'idle':
-        return 'text-muted-foreground';
+        return 'text-violet-500';
       case 'stopped':
         return 'text-muted-foreground';
       default:
         return 'text-muted-foreground';
     }
+  }
+
+  function isAnimatedState(state) {
+    const value = state?.toLowerCase();
+    return value === 'starting' || value === 'stopping';
+  }
+
+  function getIssueMessage(instance) {
+    return getTrackerIssue(instance)?.statusMessage || null;
   }
 
   const columns = [
@@ -313,12 +326,12 @@
   onscroll={onScroll}
 >
   <table class="w-full text-xs table-fixed">
-    <thead class="bg-muted/50 sticky top-0 z-10">
-      <tr>
+    <thead class="sticky top-0 z-20">
+      <tr class="border-b border-border bg-card">
         {#each columns as col (col.id)}
           <th
             class={cn(
-              'px-2 py-1 text-left text-[10px] font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap',
+              'bg-card px-2 py-1 text-left text-[10px] font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap',
               col.sortable && 'cursor-pointer select-none hover:text-foreground'
             )}
             style="width: {col.width}px"
@@ -365,6 +378,10 @@
           {@const isSelected = $selectedIds.has(instance.id)}
           {@const StateIcon = getStateIcon(instance.state)}
           {@const completionPct = instance.torrentCompletion ?? 100}
+          {@const issueMessage = getIssueMessage(instance)}
+          {@const liveRateUp = getGridLiveRate(instance.state, instance.currentUploadRate)}
+          {@const liveRateDown = getGridLiveRate(instance.state, instance.currentDownloadRate)}
+          {@const livePeers = getGridLivePeers(instance.state, instance.seeders, instance.leechers)}
           <tr
             class={cn(
               'border-t border-border/50 transition-colors cursor-pointer',
@@ -386,9 +403,27 @@
             </td>
 
             <!-- Name -->
-            <td class="px-2 py-1 whitespace-nowrap overflow-hidden">
-              <span class="text-foreground font-medium truncate" title={instance.name}>
-                {instance.name}
+            <td
+              class="px-2 py-1 whitespace-nowrap overflow-hidden select-none"
+              ondblclick={e => {
+                e.preventDefault();
+                e.stopPropagation();
+                oncontextaction('edit', instance);
+              }}
+            >
+              <span class="inline-flex max-w-full items-center gap-1.5">
+                <span class="text-foreground font-medium truncate" title={instance.name}>
+                  {instance.name}
+                </span>
+                {#if issueMessage}
+                  <span
+                    class="flex-shrink-0 text-amber-400"
+                    title={issueMessage}
+                    aria-label={issueMessage}
+                  >
+                    <AlertTriangle size={11} />
+                  </span>
+                {/if}
               </span>
             </td>
 
@@ -421,11 +456,15 @@
             <!-- State -->
             <td class="px-2 py-1 whitespace-nowrap">
               <span class={cn('flex items-center gap-1', getStateColor(instance.state))}>
-                {#if instance.state?.toLowerCase() === 'starting' || instance.state?.toLowerCase() === 'stopping'}
-                  <StateIcon size={11} class="animate-spin" />
-                {:else}
-                  <StateIcon size={11} fill="currentColor" />
-                {/if}
+                <span class={cn('inline-flex', isAnimatedState(instance.state) && 'animate-spin')}>
+                  <StateIcon
+                    size={11}
+                    fill={instance.state?.toLowerCase() === 'running' ||
+                    instance.state?.toLowerCase() === 'idle'
+                      ? 'currentColor'
+                      : 'none'}
+                  />
+                </span>
                 <span class="capitalize">{instance.state}</span>
               </span>
             </td>
@@ -466,19 +505,19 @@
 
             <!-- UL Rate -->
             <td class="px-2 py-1 whitespace-nowrap overflow-hidden">
-              <span class="text-stat-upload">{formatRate(instance.currentUploadRate)}</span>
+              <span class="text-stat-upload">{formatRate(liveRateUp)}</span>
             </td>
 
             <!-- DL Rate -->
             <td class="px-2 py-1 whitespace-nowrap overflow-hidden">
-              <span class="text-stat-leecher">{formatRate(instance.currentDownloadRate)}</span>
+              <span class="text-stat-leecher">{formatRate(liveRateDown)}</span>
             </td>
 
             <!-- Seeders / Leechers -->
             <td class="px-2 py-1 whitespace-nowrap">
-              <span class="text-stat-upload">{instance.seeders ?? '-'}</span>
+              <span class="text-stat-upload">{livePeers.seeders ?? '-'}</span>
               <span class="text-muted-foreground">/</span>
-              <span class="text-stat-leecher">{instance.leechers ?? '-'}</span>
+              <span class="text-stat-leecher">{livePeers.leechers ?? '-'}</span>
             </td>
           </tr>
         {/each}

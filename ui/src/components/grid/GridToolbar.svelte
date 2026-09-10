@@ -2,19 +2,27 @@
   import Button from '$lib/components/ui/button.svelte';
   import ConfirmDialog from '../common/ConfirmDialog.svelte';
   import Input from '$lib/components/ui/input.svelte';
-  import Select from '$lib/components/ui/select.svelte';
   import GridTagPopover from './GridTagPopover.svelte';
   import {
     selectedIds,
     gridFilters,
     gridActions,
-    allTags,
     gridInstances,
     filteredGridInstances,
   } from '$lib/gridStore.js';
-  import { Play, Square, Pause, Trash2, Upload, Search, ChevronDown } from '@lucide/svelte';
+  import {
+    Play,
+    Square,
+    Pause,
+    Trash2,
+    Upload,
+    Search,
+    ChevronDown,
+    Funnel,
+    Pencil,
+  } from '@lucide/svelte';
 
-  let { onImport = () => {} } = $props();
+  let { onImport = () => {}, onOpenFilters = () => {}, onBulkEdit = () => {} } = $props();
 
   let selectionCount = $derived($selectedIds.size);
   let totalCount = $derived($gridInstances.length);
@@ -114,14 +122,6 @@
     gridFilters.update(f => ({ ...f, search: e.target.value }));
   }
 
-  function handleStateFilter(e) {
-    gridFilters.update(f => ({ ...f, stateFilter: e.target.value }));
-  }
-
-  function handleTagFilter(e) {
-    gridFilters.update(f => ({ ...f, tagFilter: e.target.value }));
-  }
-
   function handleSelectMenuClick(e) {
     e.stopPropagation();
     selectMenuOpen = !selectMenuOpen;
@@ -140,10 +140,23 @@
   <!-- Top row: Import + Grid actions -->
   <div class="flex items-center gap-2 flex-wrap">
     <!-- Import button -->
-    <Button onclick={onImport} size="sm" class="gap-1.5">
+    <Button onclick={onImport} size="sm" class="hidden sm:inline-flex gap-1.5">
       {#snippet children()}
         <Upload size={14} />
         Import
+      {/snippet}
+    </Button>
+
+    <Button
+      onclick={onOpenFilters}
+      size="icon"
+      variant="outline"
+      class="hidden sm:inline-flex lg:hidden h-9 w-9"
+      title="Open filters"
+      aria-label="Open filters"
+    >
+      {#snippet children()}
+        <Funnel size={14} />
       {/snippet}
     </Button>
 
@@ -235,47 +248,57 @@
 
       <span class="text-xs text-muted-foreground">{selectionCount} selected</span>
 
-      <Button onclick={handleStart} size="sm" variant="default" class="gap-1" disabled={!canStart}>
+      <Button
+        onclick={handleStart}
+        size="icon"
+        variant="default"
+        class="h-9 w-9"
+        disabled={!canStart}
+        title="Start selected"
+        aria-label="Start selected"
+      >
         {#snippet children()}
-          <Play size={12} fill="currentColor" />
-          Start
+          <Play size={14} fill="currentColor" />
         {/snippet}
       </Button>
 
       <Button
         onclick={handleStop}
-        size="sm"
-        class="gap-1 bg-stat-danger hover:bg-stat-danger/90 text-white"
+        size="icon"
+        class="h-9 w-9 bg-stat-danger hover:bg-stat-danger/90 text-white"
         disabled={!canStop}
+        title="Stop selected"
+        aria-label="Stop selected"
       >
         {#snippet children()}
-          <Square size={12} fill="currentColor" />
-          Stop
+          <Square size={14} fill="currentColor" />
         {/snippet}
       </Button>
 
       <Button
         onclick={handlePause}
-        size="sm"
-        class="gap-1 bg-stat-ratio hover:bg-stat-ratio/90 text-white"
+        size="icon"
+        class="h-9 w-9 bg-stat-ratio hover:bg-stat-ratio/90 text-white"
         disabled={!canPause}
+        title="Pause selected"
+        aria-label="Pause selected"
       >
         {#snippet children()}
-          <Pause size={12} fill="currentColor" />
-          Pause
+          <Pause size={14} fill="currentColor" />
         {/snippet}
       </Button>
 
       <Button
         onclick={handleResume}
-        size="sm"
+        size="icon"
         variant="secondary"
-        class="gap-1"
+        class="h-9 w-9"
         disabled={!canResume}
+        title="Resume selected"
+        aria-label="Resume selected"
       >
         {#snippet children()}
-          <Play size={12} fill="currentColor" />
-          Resume
+          <Play size={14} fill="currentColor" />
         {/snippet}
       </Button>
 
@@ -283,10 +306,30 @@
 
       <GridTagPopover />
 
-      <Button onclick={handleDelete} size="sm" variant="destructive" class="gap-1">
+      <Button
+        onclick={onBulkEdit}
+        size="sm"
+        variant="outline"
+        class="gap-1.5"
+        title="Edit selected"
+        aria-label="Edit selected"
+      >
         {#snippet children()}
-          <Trash2 size={12} />
-          Delete
+          <Pencil size={14} />
+          Edit selected
+        {/snippet}
+      </Button>
+
+      <Button
+        onclick={handleDelete}
+        size="icon"
+        variant="destructive"
+        class="h-9 w-9"
+        title="Delete selected"
+        aria-label="Delete selected"
+      >
+        {#snippet children()}
+          <Trash2 size={14} />
         {/snippet}
       </Button>
     {/if}
@@ -297,7 +340,7 @@
     </div>
   </div>
 
-  <!-- Bottom row: Search + Filters -->
+  <!-- Bottom row: Search -->
   <div class="flex items-center gap-2">
     <div class="relative flex-1 max-w-sm">
       <Search size={14} class="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -308,37 +351,6 @@
         class="h-8 pl-8 text-xs"
       />
     </div>
-
-    <Select
-      value={$gridFilters.stateFilter}
-      onchange={handleStateFilter}
-      class="h-8 w-32 text-xs py-1"
-    >
-      {#snippet children()}
-        <option value="all">All States</option>
-        <option value="starting">Starting</option>
-        <option value="running">Running</option>
-        <option value="stopping">Stopping</option>
-        <option value="paused">Paused</option>
-        <option value="idle">Idle</option>
-        <option value="stopped">Stopped</option>
-      {/snippet}
-    </Select>
-
-    {#if $allTags.length > 0}
-      <Select
-        value={$gridFilters.tagFilter}
-        onchange={handleTagFilter}
-        class="h-8 w-32 text-xs py-1"
-      >
-        {#snippet children()}
-          <option value="">All Tags</option>
-          {#each $allTags as tag (tag)}
-            <option value={tag}>{tag}</option>
-          {/each}
-        {/snippet}
-      </Select>
-    {/if}
   </div>
 </div>
 

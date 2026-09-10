@@ -1,7 +1,5 @@
 use rustatio_core::validation;
-use rustatio_core::{
-    FakerConfig, FakerState, RatioFaker, RatioFakerHandle, TorrentInfo, TorrentSummary,
-};
+use rustatio_core::{FakerConfig, RatioFaker, RatioFakerHandle, TorrentInfo, TorrentSummary};
 use rustatio_watch::InstanceSource;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
@@ -25,24 +23,7 @@ pub async fn update_instance_config(
     config: FakerConfig,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut fakers = state.fakers.write().await;
-    let instance =
-        fakers.get_mut(&instance_id).ok_or_else(|| format!("Instance {instance_id} not found"))?;
-
-    let stats = instance.faker.stats_snapshot();
-    if matches!(stats.state, FakerState::Running | FakerState::Starting | FakerState::Paused) {
-        return Err("Cannot update config while faker is running".to_string());
-    }
-
-    instance.config = config;
-
-    instance
-        .faker
-        .update_config(instance.config.clone(), Some(state.http_client.clone()))
-        .await
-        .map_err(|e| format!("Failed to update faker config: {e}"))?;
-
-    Ok(())
+    state.apply_instance_config(instance_id, config).await
 }
 
 #[tauri::command]
@@ -86,6 +67,8 @@ pub async fn delete_instance(
         log::info!("Deleted instance {instance_id} (was not started)");
     }
 
+    state.refresh_peer_listener_port().await;
+
     Ok(())
 }
 
@@ -97,17 +80,20 @@ pub async fn list_instances(state: State<'_, AppState>) -> Result<Vec<InstanceIn
     for (id, instance) in fakers.iter() {
         let stats = instance.faker.stats_snapshot();
         instances.push(InstanceInfo {
-            id: *id,
-            torrent_name: Some(instance.summary.name.clone()),
-            is_running: matches!(
-                stats.state,
-                FakerState::Starting | FakerState::Running | FakerState::Stopping
-            ),
-            is_paused: matches!(stats.state, FakerState::Paused),
+            id: id.to_string(),
+            torrent: (*instance.summary).clone(),
+            config: instance.config.clone(),
+            stats,
+            created_at: instance.created_at,
+            source: match instance.source {
+                InstanceSource::Manual => "manual".to_string(),
+                InstanceSource::WatchFolder => "watch_folder".to_string(),
+            },
+            tags: instance.tags.clone(),
         });
     }
 
-    instances.sort_by_key(|i| i.id);
+    instances.sort_by_key(|i| i.id.parse::<u32>().unwrap_or(0));
     Ok(instances)
 }
 
@@ -170,6 +156,12 @@ pub async fn load_instance_torrent(
     );
 
     let mut fakers = state.fakers.write().await;
+    if fakers
+        .iter()
+        .any(|(id, instance)| *id != instance_id && instance.torrent.info_hash == torrent.info_hash)
+    {
+        return Err("Duplicate torrent skipped: already imported".to_string());
+    }
     let response_torrent = torrent.clone();
     let torrent_arc = Arc::new(torrent.without_files());
     let summary_arc = Arc::new(torrent_arc.summary());

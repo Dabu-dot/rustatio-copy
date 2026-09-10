@@ -1,13 +1,13 @@
 use rustatio_core::{
-    FakerConfig, FakerState, FakerStats, GridImportSettings, InstanceSummary, PresetSettings,
-    RatioFaker, RatioFakerHandle, TorrentInfo,
+    primary_tracker_host, FakerConfig, FakerState, FakerStats, GridImportSettings, InstanceSummary,
+    PresetSettings, RatioFaker, RatioFakerHandle, TorrentInfo,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tokio::task::JoinSet;
 
-use crate::logging::log_and_emit;
+use crate::logging::{format_instance_message, log_and_emit};
 use crate::state::{hex_info_hash, now_secs, AppState, FakerInstance};
 use rustatio_watch::InstanceSource;
 
@@ -29,6 +29,7 @@ pub struct GridActionError {
 #[serde(rename_all = "camelCase")]
 pub struct GridImportResponse {
     imported: Vec<GridImportedInstance>,
+    duplicates: Vec<String>,
     errors: Vec<String>,
 }
 
@@ -47,8 +48,10 @@ async fn import_torrent_files(
     app: &AppHandle,
 ) -> GridImportResponse {
     let mut imported = Vec::new();
+    let mut duplicates = Vec::new();
     let mut errors = Vec::new();
     let mut auto_start_ids = Vec::new();
+    let mut seen_hashes = std::collections::HashSet::new();
 
     let now = now_secs();
 
@@ -71,6 +74,16 @@ async fn import_torrent_files(
         let faker_config: FakerConfig = preset.into();
         let torrent_name = torrent.name.clone();
         let torrent_info_hash = torrent.info_hash;
+
+        if !seen_hashes.insert(torrent_info_hash) {
+            duplicates.push(format!("{}: duplicate in import batch", path.display()));
+            continue;
+        }
+
+        if fakers_lock.values().any(|instance| instance.torrent.info_hash == torrent_info_hash) {
+            duplicates.push(format!("{}: already imported", path.display()));
+            continue;
+        }
 
         let torrent_arc = Arc::new(torrent.without_files());
         let summary_arc = Arc::new(torrent_arc.summary());
@@ -124,7 +137,14 @@ async fn import_torrent_files(
     }
     drop(next_id);
 
-    log_and_emit!(app, info, "Imported {} torrent(s) ({} errors)", imported.len(), errors.len());
+    log_and_emit!(
+        app,
+        info,
+        "Imported {} torrent(s) ({} duplicates, {} errors)",
+        imported.len(),
+        duplicates.len(),
+        errors.len()
+    );
 
     if !auto_start_ids.is_empty() {
         let state_fakers = Arc::clone(&state.fakers);
@@ -180,7 +200,7 @@ async fn import_torrent_files(
         });
     }
 
-    GridImportResponse { imported, errors }
+    GridImportResponse { imported, duplicates, errors }
 }
 
 #[tauri::command]
@@ -210,6 +230,7 @@ pub async fn grid_import_folder(
     if torrent_paths.is_empty() {
         return Ok(GridImportResponse {
             imported: vec![],
+            duplicates: vec![],
             errors: vec!["No .torrent files found in directory".to_string()],
         });
     }
@@ -256,7 +277,7 @@ pub async fn grid_import_files(
 pub async fn grid_start(
     ids: Vec<u32>,
     state: State<'_, AppState>,
-    _app: AppHandle,
+    app: AppHandle,
 ) -> Result<GridActionResponse, String> {
     let mut succeeded = Vec::new();
     let mut failed = Vec::new();
@@ -281,6 +302,7 @@ pub async fn grid_start(
     }
 
     // Spawn HTTP announces in background — return immediately
+    let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut join_set = JoinSet::new();
         for (id, faker) in to_start {
@@ -292,8 +314,14 @@ pub async fn grid_start(
 
         while let Some(result) = join_set.join_next().await {
             match result {
-                Ok((id, Ok(()))) => log::info!("[Instance {id}] Started via grid action"),
-                Ok((id, Err(e))) => log::error!("[Instance {id}] Grid start failed: {e}"),
+                Ok((id, Ok(()))) => log::info!(
+                    "{}",
+                    format_instance_message(&app_handle, id, "Started via grid action")
+                ),
+                Ok((id, Err(e))) => {
+                    let msg = format!("Grid start failed: {e}");
+                    log::error!("{}", format_instance_message(&app_handle, id, &msg));
+                }
                 Err(e) => log::error!("Grid start join error: {e}"),
             }
         }
@@ -306,7 +334,7 @@ pub async fn grid_start(
 pub async fn grid_stop(
     ids: Vec<u32>,
     state: State<'_, AppState>,
-    _app: AppHandle,
+    app: AppHandle,
 ) -> Result<GridActionResponse, String> {
     let mut succeeded = Vec::new();
     let mut failed = Vec::new();
@@ -332,6 +360,7 @@ pub async fn grid_stop(
 
     // Spawn HTTP stop announces + cumulative stats update in background
     let fakers_arc = Arc::clone(&state.fakers);
+    let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut join_set = JoinSet::new();
         for (id, faker) in to_stop {
@@ -346,11 +375,15 @@ pub async fn grid_stop(
         while let Some(result) = join_set.join_next().await {
             match result {
                 Ok((id, stats, Ok(()))) => {
-                    log::info!("[Instance {id}] Stopped via grid action");
+                    log::info!(
+                        "{}",
+                        format_instance_message(&app_handle, id, "Stopped via grid action")
+                    );
                     stats_updates.push((id, stats));
                 }
                 Ok((id, _, Err(e))) => {
-                    log::error!("[Instance {id}] Grid stop failed: {e}");
+                    let msg = format!("Grid stop failed: {e}");
+                    log::error!("{}", format_instance_message(&app_handle, id, &msg));
                 }
                 Err(e) => log::error!("Grid stop join error: {e}"),
             }
@@ -521,6 +554,12 @@ pub async fn grid_update_config(
     }
 
     drop(fakers);
+
+    if !succeeded.is_empty() {
+        state.save_state().await?;
+    }
+
+    state.refresh_peer_listener_port().await;
     Ok(GridActionResponse { succeeded, failed })
 }
 
@@ -571,6 +610,7 @@ pub async fn bulk_update_configs(
     }
 
     drop(fakers);
+    state.refresh_peer_listener_port().await;
     Ok(GridActionResponse { succeeded, failed })
 }
 
@@ -634,6 +674,7 @@ pub async fn list_summaries(state: State<'_, AppState>) -> Result<Vec<InstanceSu
                     Arc::clone(&instance.faker),
                     instance.summary.name.clone(),
                     hex_info_hash(&instance.summary.info_hash),
+                    instance.summary.announce.clone(),
                     instance.tags.clone(),
                     instance.summary.total_size,
                     instance.created_at,
@@ -644,7 +685,9 @@ pub async fn list_summaries(state: State<'_, AppState>) -> Result<Vec<InstanceSu
     };
 
     let mut summaries = Vec::new();
-    for (id, faker, name, info_hash, tags, total_size, created_at, source) in instance_data {
+    for (id, faker, name, info_hash, announce, tags, total_size, created_at, source) in
+        instance_data
+    {
         let stats = faker.stats_snapshot();
         let state_str = match stats.state {
             FakerState::Paused => "paused",
@@ -660,7 +703,12 @@ pub async fn list_summaries(state: State<'_, AppState>) -> Result<Vec<InstanceSu
             id: id.to_string(),
             name,
             info_hash,
+            primary_tracker_host: primary_tracker_host(&announce),
             state: state_str.to_string(),
+            is_tracker_invalid: stats.tracker_error.is_some(),
+            tracker_error: stats.tracker_error.clone(),
+            tracker_retry_attempt: stats.tracker_retry_attempt,
+            tracker_retry_at_ms: stats.tracker_retry_at_ms,
             tags,
             total_size,
             uploaded: stats.uploaded,

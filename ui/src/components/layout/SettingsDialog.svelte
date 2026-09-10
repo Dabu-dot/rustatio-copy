@@ -10,9 +10,17 @@
     getDefaultPresetId,
     setDefaultPreset,
     clearDefaultPreset,
+    refreshDefaultPreset,
   } from '$lib/defaultPreset.js';
+  import {
+    buildCustomPreset,
+    buildPresetExportData,
+    normalizePreset,
+    normalizePresets,
+    normalizePresetSettings,
+  } from '$lib/customPreset.js';
   import { THEMES, THEME_CATEGORIES, getTheme, selectTheme } from '$lib/themeStore.svelte.js';
-  import { Settings, X, Check, Trash2, Download, Upload } from '@lucide/svelte';
+  import { Settings, X, Check, Trash2, Download, Upload, Save } from '@lucide/svelte';
   import PresetIcon from '../config/PresetIcon.svelte';
 
   let { isOpen = $bindable(false) } = $props();
@@ -40,53 +48,59 @@
     api.setLogLevel(level);
   }
 
-  // Custom presets stored in localStorage
-  const CUSTOM_PRESETS_KEY = 'rustatio-custom-presets';
+  // Window Close Behavior state
+  const CLOSE_BEHAVIOR_KEY = 'rustatio-close-behavior';
+  function getCloseBehavior() {
+    return localStorage.getItem(CLOSE_BEHAVIOR_KEY) || 'prompt';
+  }
 
-  function loadCustomPresets() {
-    try {
-      const stored = localStorage.getItem(CUSTOM_PRESETS_KEY);
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
+  let closeBehavior = $state(getCloseBehavior());
+
+  function saveCloseBehavior(behavior) {
+    closeBehavior = behavior;
+    localStorage.setItem(CLOSE_BEHAVIOR_KEY, behavior);
+  }
+
+  $effect(() => {
+    if (isOpen) {
+      closeBehavior = getCloseBehavior();
     }
-  }
+  });
 
-  function saveCustomPresets(presets) {
-    localStorage.setItem(CUSTOM_PRESETS_KEY, JSON.stringify(presets));
-  }
-
-  let customPresets = $state(loadCustomPresets());
+  let customPresets = $state([]);
 
   // Default preset state
   let defaultPresetId = $state(getDefaultPresetId());
   let defaultPresetName = $state(getDefaultPreset()?.name || 'Rustatio defaults');
 
+  async function loadPresetState() {
+    try {
+      customPresets = normalizePresets((await api.listCustomPresets()) || []);
+      const preset = await refreshDefaultPreset();
+      defaultPresetId = preset?.id || null;
+      defaultPresetName = preset?.name || 'Rustatio defaults';
+    } catch (e) {
+      console.warn('Failed to load preset state:', e);
+    }
+  }
+
   async function setAsDefault(preset) {
-    setDefaultPreset(preset);
+    await setDefaultPreset(preset);
     defaultPresetId = preset.id;
     defaultPresetName = preset.name || 'Unnamed preset';
-
-    // Sync to backend for watch folder support
-    try {
-      await api.setDefaultConfig(preset.settings);
-    } catch (e) {
-      console.warn('Failed to sync default config:', e);
-    }
   }
 
   async function clearDefault() {
-    clearDefaultPreset();
+    await clearDefaultPreset();
     defaultPresetId = null;
     defaultPresetName = 'Rustatio defaults';
-
-    // Clear on backend
-    try {
-      await api.clearDefaultConfig();
-    } catch (e) {
-      console.warn('Failed to clear default config:', e);
-    }
   }
+
+  $effect(() => {
+    if (isOpen) {
+      loadPresetState();
+    }
+  });
 
   // Detection avoidance tips
   const detectionTips = [
@@ -147,7 +161,7 @@
   function applyPreset(preset) {
     const active = get(activeInstanceId);
     if (active !== null) {
-      instanceActions.updateInstance(active, preset.settings);
+      instanceActions.updateInstance(active, normalizePresetSettings(preset.settings));
     }
     close();
   }
@@ -157,7 +171,7 @@
     if (!instance) return false;
 
     // Compare all settings in the preset with the instance
-    for (const [key, value] of Object.entries(preset.settings)) {
+    for (const [key, value] of Object.entries(normalizePresetSettings(preset.settings))) {
       // Handle numeric comparisons with tolerance for floating point
       if (typeof value === 'number' && typeof instance[key] === 'number') {
         if (Math.abs(instance[key] - value) > 0.001) return false;
@@ -195,87 +209,99 @@
   let exportError = $state('');
   let exportSuccess = $state('');
   let showExportDialog = $state(false);
+  let showSaveDialog = $state(false);
   let exportPresetName = $state('');
   let exportPresetDescription = $state('');
 
-  function openExportDialog() {
+  function getActiveInstanceOrThrow() {
+    const active = get(activeInstanceId);
+    if (active === null) {
+      throw new Error('No active instance. Select an instance first.');
+    }
+
+    const currentItems = get(instances);
+    const instance = currentItems.find(i => i.id === active);
+    if (!instance) {
+      throw new Error('Instance not found.');
+    }
+
+    return instance;
+  }
+
+  function resetPresetDialog() {
     exportError = '';
     exportSuccess = '';
     exportPresetName = '';
     exportPresetDescription = '';
+  }
 
-    const active = get(activeInstanceId);
-    if (active === null) {
-      exportError = 'No active instance. Select an instance first.';
-      return;
+  function openSaveDialog() {
+    resetPresetDialog();
+
+    try {
+      getActiveInstanceOrThrow();
+      showSaveDialog = true;
+    } catch (err) {
+      exportError = err.message;
     }
+  }
 
-    showExportDialog = true;
+  function openExportDialog() {
+    resetPresetDialog();
+
+    try {
+      getActiveInstanceOrThrow();
+      showExportDialog = true;
+    } catch (err) {
+      exportError = err.message;
+    }
+  }
+
+  async function savePreset(setDefault = false) {
+    exportError = '';
+    exportSuccess = '';
+
+    try {
+      const instance = getActiveInstanceOrThrow();
+      const preset = buildCustomPreset(instance, {
+        name: exportPresetName,
+        description: exportPresetDescription,
+      });
+
+      await api.upsertCustomPreset(preset);
+      customPresets = [...customPresets.filter(p => p.id !== preset.id), preset];
+
+      if (setDefault) {
+        await setAsDefault(preset);
+      }
+
+      exportSuccess = setDefault
+        ? `Preset "${preset.name}" saved and set as default`
+        : `Preset "${preset.name}" saved successfully`;
+      showSaveDialog = false;
+    } catch (err) {
+      exportError = err.message;
+    }
   }
 
   async function exportPreset() {
     exportError = '';
     exportSuccess = '';
+    let presetData;
 
-    if (!exportPresetName.trim()) {
-      exportError = 'Please enter a preset name.';
+    try {
+      const instance = getActiveInstanceOrThrow();
+      presetData = buildPresetExportData(instance, {
+        name: exportPresetName,
+        description: exportPresetDescription,
+      });
+    } catch (err) {
+      exportError = err.message;
       return;
     }
-
-    const active = get(activeInstanceId);
-    if (active === null) {
-      exportError = 'No active instance. Select an instance first.';
-      return;
-    }
-
-    const currentInstances = get(instances);
-    const instance = currentInstances.find(i => i.id === active);
-    if (!instance) {
-      exportError = 'Instance not found.';
-      return;
-    }
-
-    const presetData = {
-      version: 1,
-      type: 'rustatio-preset',
-      name: exportPresetName.trim(),
-      description:
-        exportPresetDescription.trim() ||
-        `Custom preset created on ${new Date().toLocaleDateString()}`,
-      icon: 'star',
-      createdAt: new Date().toISOString(),
-      settings: {
-        selectedClient: instance.selectedClient,
-        selectedClientVersion: instance.selectedClientVersion,
-        uploadRate: instance.uploadRate,
-        downloadRate: instance.downloadRate,
-        port: instance.port,
-        completionPercent: instance.completionPercent,
-        randomizeRates: instance.randomizeRates,
-        randomRangePercent: instance.randomRangePercent,
-        updateIntervalSeconds: instance.updateIntervalSeconds,
-        scrapeInterval: instance.scrapeInterval,
-        progressiveRatesEnabled: instance.progressiveRatesEnabled,
-        targetUploadRate: instance.targetUploadRate,
-        targetDownloadRate: instance.targetDownloadRate,
-        progressiveDurationHours: instance.progressiveDurationHours,
-        // Stop conditions
-        stopAtRatioEnabled: instance.stopAtRatioEnabled,
-        stopAtRatio: instance.stopAtRatio,
-        stopAtUploadedEnabled: instance.stopAtUploadedEnabled,
-        stopAtUploadedGB: instance.stopAtUploadedGB,
-        stopAtDownloadedEnabled: instance.stopAtDownloadedEnabled,
-        stopAtDownloadedGB: instance.stopAtDownloadedGB,
-        stopAtSeedTimeEnabled: instance.stopAtSeedTimeEnabled,
-        stopAtSeedTimeHours: instance.stopAtSeedTimeHours,
-        idleWhenNoLeechers: instance.idleWhenNoLeechers,
-        idleWhenNoSeeders: instance.idleWhenNoSeeders,
-      },
-    };
 
     // Create a safe filename from the preset name
-    const safeFilename = exportPresetName
-      .trim()
+    const safeFilename = presetData.name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
@@ -350,19 +376,19 @@
       }
 
       // Create custom preset object
-      const newPreset = {
+      const newPreset = normalizePreset({
         id: `custom-${Date.now()}`,
         name: data.name || 'Imported Preset',
         description: data.description || 'Imported custom preset',
         icon: data.icon || 'folder',
         custom: true,
-        createdAt: data.createdAt || new Date().toISOString(),
+        created_at: data.created_at || data.createdAt || new Date().toISOString(),
         settings: data.settings,
-      };
+      });
 
       // Add to custom presets
-      customPresets = [...customPresets, newPreset];
-      saveCustomPresets(customPresets);
+      await api.upsertCustomPreset(newPreset);
+      customPresets = [...customPresets.filter(p => p.id !== newPreset.id), newPreset];
 
       importSuccess = `Preset "${newPreset.name}" imported successfully`;
     } catch (err) {
@@ -373,9 +399,12 @@
     if (fileInput) fileInput.value = '';
   }
 
-  function deleteCustomPreset(presetId) {
+  async function deleteCustomPreset(presetId) {
+    await api.deleteCustomPreset(presetId);
     customPresets = customPresets.filter(p => p.id !== presetId);
-    saveCustomPresets(customPresets);
+    if (defaultPresetId === presetId) {
+      await clearDefault();
+    }
   }
 
   function getImportanceColor(importance) {
@@ -501,6 +530,34 @@
               Note: Log level changes apply to the backend.
             </p>
           </div>
+
+          <!-- Window Behavior Section (Tauri only) -->
+          {#if isTauri}
+            <div class="border border-border rounded-lg p-4">
+              <h3 class="font-semibold text-foreground mb-2">Window Behavior</h3>
+              <p class="text-sm text-muted-foreground mb-4">
+                Choose the action that occurs when you click the window close button.
+              </p>
+              <div class="flex items-center gap-4">
+                <label for="closeBehavior" class="text-sm font-medium min-w-[60px]">On Close</label>
+                <select
+                  id="closeBehavior"
+                  value={closeBehavior}
+                  onchange={e => saveCloseBehavior(e.target.value)}
+                  class="px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-primary/50 w-56"
+                >
+                  <option value="prompt">Ask every time</option>
+                  <option value="tray">Minimize to tray</option>
+                  <option value="quit">Quit application</option>
+                </select>
+              </div>
+              <div class="mt-3 text-xs text-muted-foreground space-y-1">
+                <p><strong>Ask every time:</strong> Show a prompt to choose action</p>
+                <p><strong>Minimize to tray:</strong> Keep app running in background</p>
+                <p><strong>Quit application:</strong> Completely close the application</p>
+              </div>
+            </div>
+          {/if}
 
           <!-- Theme Section -->
           <div class="border border-border rounded-lg p-4">
@@ -807,14 +864,34 @@
               </div>
             {:else}
               <p class="text-sm text-muted-foreground mb-4">
-                No custom presets yet. Export your current config or import a preset file.
+                No custom presets yet. Save the current instance as a preset or import a preset
+                file.
               </p>
             {/if}
 
             <!-- Import/Export Section -->
             <div class="border border-dashed border-border rounded-lg p-4 space-y-4">
-              <!-- Export current config -->
+              <!-- Save current config -->
               <div>
+                <h4 class="font-medium text-foreground mb-2">Save Current as Preset</h4>
+                <p class="text-sm text-muted-foreground mb-3">
+                  Save the active instance configuration directly into your custom presets.
+                </p>
+                <button
+                  type="button"
+                  onclick={openSaveDialog}
+                  class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg font-semibold ring-offset-background transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-primary-foreground shadow-lg shadow-primary/25 hover:bg-primary/90 hover:shadow-xl hover:shadow-primary/30 hover:-translate-y-0.5 active:scale-95 px-4 py-2 text-sm"
+                >
+                  <Save size={16} />
+                  Save Preset
+                </button>
+                {#if exportSuccess}
+                  <p class="mt-2 text-sm text-stat-upload">{exportSuccess}</p>
+                {/if}
+              </div>
+
+              <!-- Export current config -->
+              <div class="border-t border-border pt-4">
                 <h4 class="font-medium text-foreground mb-2">Export Current Config</h4>
                 <p class="text-sm text-muted-foreground mb-3">
                   Save your current configuration as a JSON file that can be shared and imported.
@@ -827,9 +904,6 @@
                   <Download size={16} />
                   Export Config
                 </button>
-                {#if exportSuccess}
-                  <p class="mt-2 text-sm text-stat-upload">{exportSuccess}</p>
-                {/if}
               </div>
 
               <!-- Import preset -->
@@ -886,6 +960,84 @@
           {/each}
         </div>
       {/if}
+    </div>
+  </BaseModal>
+{/if}
+
+<!-- Save Preset Dialog -->
+{#if showSaveDialog}
+  <BaseModal
+    bind:open={showSaveDialog}
+    onClose={() => (showSaveDialog = false)}
+    titleId="save-dialog-title"
+    maxWidthClass="max-w-md"
+    panelClass="animate-in fade-in zoom-in-95 duration-200"
+  >
+    <div class="flex items-center justify-between p-4 border-b border-border">
+      <h3 id="save-dialog-title" class="text-lg font-semibold text-foreground">Save Preset</h3>
+      <button
+        onclick={() => (showSaveDialog = false)}
+        class="p-1 rounded hover:bg-muted transition-colors"
+        aria-label="Close dialog"
+      >
+        <X size={18} />
+      </button>
+    </div>
+
+    <div class="p-4 space-y-4">
+      <div>
+        <label for="save-preset-name" class="block text-sm font-medium text-foreground mb-1">
+          Preset Name <span class="text-stat-leecher">*</span>
+        </label>
+        <input
+          id="save-preset-name"
+          type="text"
+          bind:value={exportPresetName}
+          placeholder="e.g., My Tracker Config"
+          class="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-primary/50"
+        />
+      </div>
+
+      <div>
+        <label for="save-preset-description" class="block text-sm font-medium text-foreground mb-1">
+          Description <span class="text-muted-foreground text-xs">(optional)</span>
+        </label>
+        <textarea
+          id="save-preset-description"
+          bind:value={exportPresetDescription}
+          placeholder="Describe what this preset is for..."
+          rows="2"
+          class="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+        ></textarea>
+      </div>
+
+      {#if exportError}
+        <p class="text-sm text-stat-leecher">{exportError}</p>
+      {/if}
+    </div>
+
+    <div class="flex justify-end gap-3 p-4 border-t border-border">
+      <button
+        type="button"
+        onclick={() => (showSaveDialog = false)}
+        class="px-4 py-2 text-sm font-medium rounded-lg border border-border hover:bg-muted transition-colors"
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        onclick={() => savePreset(false)}
+        class="px-4 py-2 text-sm font-medium rounded-lg border border-border hover:bg-muted transition-colors"
+      >
+        Save
+      </button>
+      <button
+        type="button"
+        onclick={() => savePreset(true)}
+        class="px-4 py-2 text-sm font-semibold rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+      >
+        Save and Set Default
+      </button>
     </div>
   </BaseModal>
 {/if}

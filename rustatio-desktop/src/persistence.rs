@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedInstance {
@@ -48,9 +50,7 @@ const fn default_watch_max_depth() -> u32 {
 }
 
 fn default_watch_auto_start() -> bool {
-    std::env::var("WATCH_AUTO_START")
-        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false)
+    std::env::var("WATCH_AUTO_START").is_ok_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,10 +74,41 @@ impl Default for WatchSettings {
 }
 
 fn state_file_path() -> PathBuf {
+    if let Some(override_path) = test_state_file_path() {
+        return override_path;
+    }
+
     std::env::var("HOME").map_or_else(
         |_| PathBuf::from("desktop-state.json"),
         |home| PathBuf::from(home).join(".config").join("rustatio").join("desktop-state.json"),
     )
+}
+
+#[allow(clippy::missing_const_for_fn)]
+fn test_state_file_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        let guard = test_state_path_store().lock().ok()?;
+        guard.clone()
+    }
+
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
+#[cfg(test)]
+fn test_state_path_store() -> &'static Mutex<Option<PathBuf>> {
+    static TEST_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    TEST_PATH.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+pub fn set_test_state_file_path(path: Option<PathBuf>) {
+    if let Ok(mut guard) = test_state_path_store().lock() {
+        *guard = path;
+    }
 }
 
 pub fn load_state() -> PersistedState {

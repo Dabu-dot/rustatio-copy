@@ -58,6 +58,7 @@ pub struct GridBulkUpdateConfigEntry {
 #[derive(Serialize)]
 pub struct GridImportResponse {
     pub imported: Vec<GridImportedInstance>,
+    pub duplicates: Vec<String>,
     pub errors: Vec<String>,
 }
 
@@ -80,10 +81,28 @@ pub struct GridActionError {
     pub error: String,
 }
 
+fn is_torrent_upload_field(name: Option<&str>, file_name: Option<&str>) -> bool {
+    if matches!(name, Some("config")) {
+        return false;
+    }
+
+    matches!(name, Some("files" | "file")) || file_name.is_some()
+}
+
+const fn has_grid_import_items(
+    torrents: &[(String, TorrentSummary)],
+    duplicates: &[String],
+    errors: &[String],
+) -> bool {
+    !torrents.is_empty() || !duplicates.is_empty() || !errors.is_empty()
+}
+
 pub async fn grid_import(State(state): State<ServerState>, mut multipart: Multipart) -> Response {
     let mut torrents: Vec<(String, TorrentSummary)> = Vec::new();
     let mut config = GridImportSettings::default();
+    let mut duplicates: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut seen_hashes = std::collections::HashSet::new();
 
     loop {
         match multipart.next_field().await {
@@ -105,11 +124,25 @@ pub async fn grid_import(State(state): State<ServerState>, mut multipart: Multip
                         );
                     }
                 },
-                Some("files" | "file") => {
+                name if is_torrent_upload_field(name, field.file_name()) => {
                     let filename = field.file_name().unwrap_or("unknown").to_string();
                     match field.bytes().await {
                         Ok(bytes) => match TorrentSummary::from_bytes(&bytes) {
                             Ok(summary) => {
+                                if !seen_hashes.insert(summary.info_hash) {
+                                    duplicates
+                                        .push(format!("{filename}: duplicate in import batch"));
+                                    continue;
+                                }
+                                if state
+                                    .app
+                                    .find_instance_by_info_hash(&summary.info_hash)
+                                    .await
+                                    .is_some()
+                                {
+                                    duplicates.push(format!("{filename}: already imported"));
+                                    continue;
+                                }
                                 let id = state.app.next_instance_id();
                                 torrents.push((id, summary));
                             }
@@ -132,7 +165,7 @@ pub async fn grid_import(State(state): State<ServerState>, mut multipart: Multip
         }
     }
 
-    if torrents.is_empty() && errors.is_empty() {
+    if !has_grid_import_items(&torrents, &duplicates, &errors) {
         return ApiError::response(StatusCode::BAD_REQUEST, "No torrent files provided");
     }
 
@@ -160,7 +193,11 @@ pub async fn grid_import(State(state): State<ServerState>, mut multipart: Multip
                 });
             }
             Err(e) => {
-                errors.push(format!("{}: {}", summary.name, e));
+                if e.starts_with("Duplicate torrent skipped:") {
+                    duplicates.push(format!("{}: {}", summary.name, e));
+                } else {
+                    errors.push(format!("{}: {}", summary.name, e));
+                }
             }
         }
     }
@@ -181,7 +218,7 @@ pub async fn grid_import(State(state): State<ServerState>, mut multipart: Multip
         }
     }
 
-    ApiSuccess::response(GridImportResponse { imported, errors })
+    ApiSuccess::response(GridImportResponse { imported, duplicates, errors })
 }
 
 pub async fn grid_import_folder(
@@ -197,7 +234,9 @@ pub async fn grid_import_folder(
     }
 
     let mut torrents: Vec<(String, TorrentSummary)> = Vec::new();
+    let mut duplicates: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut seen_hashes = std::collections::HashSet::new();
 
     let entries = match std::fs::read_dir(path) {
         Ok(e) => e,
@@ -221,8 +260,12 @@ pub async fn grid_import_folder(
             Ok(bytes) => match TorrentSummary::from_bytes(&bytes) {
                 Ok(summary) => {
                     // Skip if already imported (same info_hash)
+                    if !seen_hashes.insert(summary.info_hash) {
+                        duplicates.push(format!("{filename}: duplicate in import batch"));
+                        continue;
+                    }
                     if state.app.find_instance_by_info_hash(&summary.info_hash).await.is_some() {
-                        errors.push(format!("{filename}: already imported"));
+                        duplicates.push(format!("{filename}: already imported"));
                         continue;
                     }
                     let id = state.app.next_instance_id();
@@ -263,7 +306,11 @@ pub async fn grid_import_folder(
                 });
             }
             Err(e) => {
-                errors.push(format!("{}: {}", summary.name, e));
+                if e.starts_with("Duplicate torrent skipped:") {
+                    duplicates.push(format!("{}: {}", summary.name, e));
+                } else {
+                    errors.push(format!("{}: {}", summary.name, e));
+                }
             }
         }
     }
@@ -281,7 +328,7 @@ pub async fn grid_import_folder(
         }
     }
 
-    ApiSuccess::response(GridImportResponse { imported, errors })
+    ApiSuccess::response(GridImportResponse { imported, duplicates, errors })
 }
 
 pub async fn grid_start(
@@ -462,4 +509,47 @@ pub fn router() -> Router<ServerState> {
         .route("/grid/tag", post(grid_tag))
         .route("/instances/summary", get(list_summaries))
         .route("/instances/{id}/tags", put(set_instance_tags))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_grid_import_items, is_torrent_upload_field};
+    use rustatio_core::TorrentSummary;
+
+    #[test]
+    fn torrent_upload_field_accepts_known_names() {
+        assert!(is_torrent_upload_field(Some("file"), None));
+        assert!(is_torrent_upload_field(Some("files"), None));
+    }
+
+    #[test]
+    fn torrent_upload_field_accepts_named_file_parts() {
+        assert!(is_torrent_upload_field(Some("upload"), Some("sample.torrent")));
+        assert!(is_torrent_upload_field(None, Some("sample.torrent")));
+    }
+
+    #[test]
+    fn torrent_upload_field_skips_config_and_empty_parts() {
+        assert!(!is_torrent_upload_field(Some("config"), None));
+        assert!(!is_torrent_upload_field(Some("unknown"), None));
+        assert!(!is_torrent_upload_field(None, None));
+    }
+
+    #[test]
+    fn grid_import_items_treat_duplicates_as_valid_result() {
+        let torrents: Vec<(String, TorrentSummary)> = Vec::new();
+        let duplicates = vec!["sample.torrent: already imported".to_string()];
+        let errors: Vec<String> = Vec::new();
+
+        assert!(has_grid_import_items(&torrents, &duplicates, &errors));
+    }
+
+    #[test]
+    fn grid_import_items_require_torrents_duplicates_or_errors() {
+        let torrents: Vec<(String, TorrentSummary)> = Vec::new();
+        let duplicates: Vec<String> = Vec::new();
+        let errors: Vec<String> = Vec::new();
+
+        assert!(!has_grid_import_items(&torrents, &duplicates, &errors));
+    }
 }

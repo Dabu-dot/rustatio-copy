@@ -29,6 +29,64 @@ pub struct PersistedInstance {
     pub source: InstanceSource,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub runtime: Option<PersistedRuntime>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedRuntime {
+    pub uploaded: u64,
+    pub downloaded: u64,
+    pub ratio: f64,
+    pub left: u64,
+    pub torrent_completion: f64,
+    pub seeders: i64,
+    pub leechers: i64,
+    pub session_uploaded: u64,
+    pub session_downloaded: u64,
+    pub session_ratio: f64,
+    pub elapsed_secs: u64,
+    pub current_upload_rate: f64,
+    pub current_download_rate: f64,
+    pub average_upload_rate: f64,
+    pub average_download_rate: f64,
+    pub upload_progress: f64,
+    pub download_progress: f64,
+    pub ratio_progress: f64,
+    pub seed_time_progress: f64,
+    pub effective_stop_at_ratio: Option<f64>,
+    pub eta_ratio_secs: Option<u64>,
+    pub eta_uploaded_secs: Option<u64>,
+    pub eta_seed_time_secs: Option<u64>,
+    pub eta_download_completion_secs: Option<u64>,
+    pub stop_condition_met: bool,
+    pub is_idling: bool,
+    pub idling_reason: Option<String>,
+    #[serde(default)]
+    pub tracker_error: Option<String>,
+    pub announce_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CustomPreset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub icon: String,
+    #[serde(default)]
+    pub custom: bool,
+    #[serde(alias = "createdAt")]
+    pub created_at: String,
+    #[schema(value_type = Object)]
+    pub settings: rustatio_core::PresetSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DefaultPreset {
+    pub id: String,
+    pub name: String,
+    #[schema(value_type = Object)]
+    pub settings: rustatio_core::PresetSettings,
 }
 
 const fn default_watch_max_depth() -> u32 {
@@ -36,9 +94,7 @@ const fn default_watch_max_depth() -> u32 {
 }
 
 fn default_watch_auto_start() -> bool {
-    std::env::var("WATCH_AUTO_START")
-        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false)
+    std::env::var("WATCH_AUTO_START").is_ok_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -61,13 +117,24 @@ pub struct PersistedState {
     #[serde(default)]
     pub default_config: Option<FakerConfig>,
     #[serde(default)]
+    pub default_preset: Option<DefaultPreset>,
+    #[serde(default)]
     pub watch_settings: Option<WatchSettings>,
+    #[serde(default)]
+    pub custom_presets: Vec<CustomPreset>,
     pub version: u32,
 }
 
 impl PersistedState {
     pub fn new() -> Self {
-        Self { instances: HashMap::new(), default_config: None, watch_settings: None, version: 1 }
+        Self {
+            instances: HashMap::new(),
+            default_config: None,
+            default_preset: None,
+            watch_settings: None,
+            custom_presets: Vec::new(),
+            version: 1,
+        }
     }
 }
 

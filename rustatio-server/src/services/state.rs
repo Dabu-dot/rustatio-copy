@@ -2,16 +2,22 @@ use super::events::{EventBroadcaster, InstanceEvent, LogEvent};
 use super::instance::{FakerInstance, InstanceInfo};
 use super::lifecycle::InstanceLifecycle;
 use super::persistence::{
-    now_timestamp, InstanceSource, PersistedInstance, PersistedState, Persistence, WatchSettings,
+    now_timestamp, CustomPreset, DefaultPreset, InstanceSource, PersistedInstance,
+    PersistedRuntime, PersistedState, Persistence, WatchSettings,
 };
 use rustatio_core::logger::set_instance_context_str;
 use rustatio_core::{
-    FakerConfig, FakerState, FakerStats, InstanceSummary, RatioFaker, RatioFakerHandle,
-    TorrentInfo, TorrentSummary,
+    primary_tracker_host, FakerConfig, FakerState, FakerStats, InstanceSummary,
+    PeerListenerService, PeerListenerStatus, RatioFaker, RatioFakerHandle, TorrentInfo,
+    TorrentSummary,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use std::time::Duration;
+use tokio::sync::{broadcast, Mutex, RwLock};
+
+type PeerListenerHandle = Arc<Mutex<PeerListenerService>>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -20,8 +26,14 @@ pub struct AppState {
     pub instance_sender: broadcast::Sender<InstanceEvent>,
     persistence: Arc<Persistence>,
     default_config: Arc<RwLock<Option<FakerConfig>>>,
+    default_preset: Arc<RwLock<Option<DefaultPreset>>>,
     watch_settings: Arc<RwLock<Option<WatchSettings>>>,
+    custom_presets: Arc<RwLock<Vec<CustomPreset>>>,
     http_client: reqwest::Client,
+    forwarded_port: Arc<AtomicU16>,
+    server_vpn_port_sync: bool,
+    peer_listener: Arc<RwLock<Option<PeerListenerHandle>>>,
+    peer_listener_status: Arc<RwLock<PeerListenerStatus>>,
 }
 
 pub struct InstanceBuildContext {
@@ -63,37 +75,193 @@ impl AppState {
             instance_sender,
             persistence: Arc::new(Persistence::new(data_dir)),
             default_config: Arc::new(RwLock::new(None)),
+            default_preset: Arc::new(RwLock::new(None)),
             watch_settings: Arc::new(RwLock::new(None)),
+            custom_presets: Arc::new(RwLock::new(Vec::new())),
             http_client: reqwest::Client::new(),
+            forwarded_port: Arc::new(AtomicU16::new(0)),
+            server_vpn_port_sync: std::env::var("VPN_PORT_SYNC").is_ok_and(|v| {
+                matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+            }),
+            peer_listener: Arc::new(RwLock::new(None)),
+            peer_listener_status: Arc::new(RwLock::new(PeerListenerStatus::default())),
         }
+    }
+
+    pub fn current_forwarded_port(&self) -> Option<u16> {
+        match self.forwarded_port.load(Ordering::Relaxed) {
+            0 => None,
+            port => Some(port),
+        }
+    }
+
+    pub fn set_current_forwarded_port(&self, port: Option<u16>) {
+        self.forwarded_port.store(port.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    pub const fn vpn_port_sync_enabled(&self) -> bool {
+        self.server_vpn_port_sync
+    }
+
+    pub async fn peer_listener_status(&self) -> PeerListenerStatus {
+        self.peer_listener_status.read().await.clone()
+    }
+
+    pub async fn set_peer_listener_status(&self, status: PeerListenerStatus) {
+        *self.peer_listener_status.write().await = status;
+    }
+
+    pub async fn attach_peer_listener(&self, listener: PeerListenerHandle) {
+        *self.peer_listener.write().await = Some(listener);
+        self.refresh_peer_listener_port().await;
+    }
+
+    async fn desired_peer_port_from_instances(&self) -> Result<Option<u16>, String> {
+        let instances = self.instances.read().await;
+        let mut manual_ports = BTreeSet::new();
+        let mut has_synced_active = false;
+
+        for instance in instances.values() {
+            let state = instance.faker.stats_snapshot().state;
+            if matches!(state, FakerState::Starting | FakerState::Running | FakerState::Paused) {
+                if instance.config.vpn_port_sync {
+                    has_synced_active = true;
+                } else {
+                    manual_ports.insert(instance.config.port);
+                }
+            }
+        }
+
+        if has_synced_active {
+            if let Some(port) = self.current_forwarded_port() {
+                if manual_ports.is_empty() {
+                    return Ok(Some(port));
+                }
+
+                return Err(format!(
+                    "multiple active peer ports configured: {}, {}",
+                    port,
+                    manual_ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+
+        match manual_ports.len() {
+            0 => Ok(None),
+            1 => Ok(manual_ports.iter().next().copied()),
+            _ => Err(format!(
+                "multiple active peer ports configured: {}",
+                manual_ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+
+    pub async fn refresh_peer_listener_port(&self) {
+        let listener = self.peer_listener.read().await.clone();
+        let Some(listener) = listener else {
+            return;
+        };
+
+        match self.desired_peer_port_from_instances().await {
+            Ok(port) => {
+                listener.lock().await.set_desired_port(port);
+            }
+            Err(err) => {
+                tracing::warn!("Peer listener disabled: {err}");
+                listener.lock().await.set_desired_port(None);
+                let current = self.peer_listener_status().await;
+                self.set_peer_listener_status(PeerListenerStatus {
+                    enabled: true,
+                    desired_port: None,
+                    bound_port: None,
+                    active_torrents: current.active_torrents,
+                    last_error: Some(err),
+                })
+                .await;
+            }
+        }
+    }
+
+    fn apply_forwarded_port_to_config(&self, config: &mut FakerConfig) {
+        if config.vpn_port_sync {
+            if let Some(port) = self.current_forwarded_port() {
+                config.port = port;
+            }
+        }
+    }
+
+    const fn apply_cumulative_totals(config: &mut FakerConfig, uploaded: u64, downloaded: u64) {
+        config.initial_uploaded = uploaded;
+        config.initial_downloaded = downloaded;
     }
 
     pub async fn get_default_config(&self) -> Option<FakerConfig> {
         self.default_config.read().await.clone()
     }
 
+    pub async fn get_default_preset(&self) -> Option<DefaultPreset> {
+        self.default_preset.read().await.clone()
+    }
+
+    pub async fn get_effective_default_config(&self) -> FakerConfig {
+        let mut config = self.get_default_config().await.unwrap_or_else(|| FakerConfig {
+            vpn_port_sync: self.server_vpn_port_sync,
+            ..FakerConfig::default()
+        });
+        self.apply_forwarded_port_to_config(&mut config);
+        config
+    }
+
     pub async fn set_default_config(&self, config: Option<FakerConfig>) -> Result<(), String> {
         *self.default_config.write().await = config.clone();
+        *self.default_preset.write().await = None;
+        self.save_state().await
+    }
 
-        let existing = self.persistence.load().await;
-        let mut updated = existing;
-        updated.default_config = config;
-
-        self.persistence.save(&updated).await
+    pub async fn set_default_preset(&self, preset: Option<DefaultPreset>) -> Result<(), String> {
+        *self.default_preset.write().await = preset.clone();
+        *self.default_config.write().await = preset.clone().map(|value| value.settings.into());
+        self.save_state().await
     }
 
     pub async fn get_watch_settings_optional(&self) -> Option<WatchSettings> {
         self.watch_settings.read().await.clone()
     }
 
+    pub async fn list_custom_presets(&self) -> Vec<CustomPreset> {
+        self.custom_presets.read().await.clone()
+    }
+
+    pub async fn upsert_custom_preset(&self, preset: CustomPreset) -> Result<(), String> {
+        let mut presets = self.custom_presets.write().await;
+
+        if let Some(existing) = presets.iter_mut().find(|item| item.id == preset.id) {
+            *existing = preset;
+        } else {
+            presets.push(preset);
+        }
+
+        drop(presets);
+        self.save_state().await
+    }
+
+    pub async fn delete_custom_preset(&self, id: &str) -> Result<(), String> {
+        let mut presets = self.custom_presets.write().await;
+        let original_len = presets.len();
+        presets.retain(|preset| preset.id != id);
+        let changed = presets.len() != original_len;
+        drop(presets);
+
+        if changed {
+            self.save_state().await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn set_watch_settings(&self, settings: WatchSettings) -> Result<(), String> {
         *self.watch_settings.write().await = Some(settings.clone());
-
-        let existing = self.persistence.load().await;
-        let mut updated = existing;
-        updated.watch_settings = Some(settings);
-
-        self.persistence.save(&updated).await
+        self.save_state().await
     }
 
     pub async fn load_saved_state(&self) -> Result<usize, String> {
@@ -104,9 +272,21 @@ impl AppState {
             tracing::info!("Restored default config from saved state");
         }
 
+        if let Some(preset) = saved.default_preset.clone() {
+            *self.default_preset.write().await = Some(preset);
+        }
+
         if let Some(settings) = saved.watch_settings.clone() {
             *self.watch_settings.write().await = Some(settings);
             tracing::info!("Restored watch settings from saved state");
+        }
+
+        if !saved.custom_presets.is_empty() {
+            *self.custom_presets.write().await = saved.custom_presets.clone();
+            tracing::info!(
+                "Restored {} custom preset(s) from saved state",
+                saved.custom_presets.len()
+            );
         }
 
         let mut restored_count = 0;
@@ -122,8 +302,11 @@ impl AppState {
             );
 
             let mut faker_config = persisted.config.clone();
-            faker_config.initial_uploaded = persisted.cumulative_uploaded;
-            faker_config.initial_downloaded = persisted.cumulative_downloaded;
+            let runtime = persisted.runtime.as_ref();
+            faker_config.initial_uploaded =
+                runtime.map_or(persisted.cumulative_uploaded, |rt| rt.uploaded);
+            faker_config.initial_downloaded =
+                runtime.map_or(persisted.cumulative_downloaded, |rt| rt.downloaded);
 
             let summary = Arc::new(persisted.torrent.clone());
             let torrent = Arc::new(persisted.torrent.to_info());
@@ -134,6 +317,17 @@ impl AppState {
                 Some(self.http_client.clone()),
             ) {
                 Ok(faker) => {
+                    let restored_stats = runtime.map_or_else(
+                        || Self::default_runtime_stats(&persisted.config),
+                        |value| {
+                            Self::stats_from_runtime(
+                                value,
+                                persisted.state,
+                                persisted.config.post_stop_action,
+                            )
+                        },
+                    );
+
                     let instance = FakerInstance {
                         faker: Arc::new(RatioFakerHandle::new(faker)),
                         torrent,
@@ -146,6 +340,8 @@ impl AppState {
                         source: persisted.source,
                         tags: persisted.tags.clone(),
                     };
+
+                    instance.faker.restore_snapshot(restored_stats).await;
 
                     self.instances.write().await.insert(id.clone(), instance);
 
@@ -189,12 +385,16 @@ impl AppState {
         let instances = self.instances.read().await;
 
         let default_config = self.default_config.read().await.clone();
+        let default_preset = self.default_preset.read().await.clone();
         let watch_settings = self.watch_settings.read().await.clone();
+        let custom_presets = self.custom_presets.read().await.clone();
 
         let mut persisted = PersistedState {
             instances: HashMap::new(),
             default_config,
+            default_preset,
             watch_settings,
+            custom_presets,
             version: 1,
         };
 
@@ -216,6 +416,7 @@ impl AppState {
                     updated_at: now_timestamp(),
                     source: instance.source,
                     tags: instance.tags.clone(),
+                    runtime: Some(Self::runtime_from_stats(&stats)),
                 },
             );
         }
@@ -239,10 +440,14 @@ impl AppState {
     ) -> Result<(), String> {
         let mut instances = self.instances.write().await;
         let instance = instances.get_mut(id).ok_or("Instance not found")?;
-
+        let mut config = config;
+        self.apply_forwarded_port_to_config(&mut config);
         let mut faker_config = config.clone();
-        faker_config.initial_uploaded = instance.cumulative_uploaded;
-        faker_config.initial_downloaded = instance.cumulative_downloaded;
+        Self::apply_cumulative_totals(
+            &mut faker_config,
+            instance.cumulative_uploaded,
+            instance.cumulative_downloaded,
+        );
 
         instance
             .faker
@@ -250,6 +455,13 @@ impl AppState {
             .await
             .map_err(|e| e.to_string())?;
         instance.config = config;
+        drop(instances);
+
+        if let Err(e) = self.save_state().await {
+            tracing::warn!("Failed to save state after updating instance config: {}", e);
+        }
+
+        self.refresh_peer_listener_port().await;
 
         Ok(())
     }
@@ -261,6 +473,8 @@ impl AppState {
     ) -> Result<(), String> {
         let mut instances = self.instances.write().await;
         let instance = instances.get_mut(id).ok_or("Instance not found")?;
+        let mut config = config;
+        self.apply_forwarded_port_to_config(&mut config);
         instance.config = config.clone();
 
         instance
@@ -268,6 +482,13 @@ impl AppState {
             .update_config(config, Some(self.http_client.clone()))
             .await
             .map_err(|e| format!("Failed to update faker config: {e}"))?;
+        drop(instances);
+
+        if let Err(e) = self.save_state().await {
+            tracing::warn!("Failed to save state after updating instance config: {}", e);
+        }
+
+        self.refresh_peer_listener_port().await;
 
         Ok(())
     }
@@ -283,9 +504,15 @@ impl AppState {
         for (id, config) in entries {
             match instances.get_mut(&id) {
                 Some(instance) => {
+                    let mut config = config;
+                    self.apply_forwarded_port_to_config(&mut config);
+
                     let mut faker_config = config.clone();
-                    faker_config.initial_uploaded = instance.cumulative_uploaded;
-                    faker_config.initial_downloaded = instance.cumulative_downloaded;
+                    Self::apply_cumulative_totals(
+                        &mut faker_config,
+                        instance.cumulative_uploaded,
+                        instance.cumulative_downloaded,
+                    );
 
                     let result = instance
                         .faker
@@ -307,6 +534,16 @@ impl AppState {
             }
         }
 
+        drop(instances);
+
+        if !succeeded.is_empty() {
+            if let Err(e) = self.save_state().await {
+                tracing::warn!("Failed to save state after bulk config update: {}", e);
+            }
+        }
+
+        self.refresh_peer_listener_port().await;
+
         (succeeded, failed)
     }
 
@@ -316,12 +553,14 @@ impl AppState {
         torrent: TorrentInfo,
         config: FakerConfig,
     ) -> Result<(), String> {
+        let mut config = config;
+        self.apply_forwarded_port_to_config(&mut config);
         let context = InstanceBuildContext::new(id, torrent, config, InstanceSource::Manual);
         self.create_instance_internal(context).await
     }
 
     pub async fn create_idle_instance(&self, id: &str, torrent: TorrentInfo) -> Result<(), String> {
-        let config = FakerConfig::default();
+        let config = self.get_effective_default_config().await;
         let context = InstanceBuildContext::new(id, torrent, config, InstanceSource::Manual);
         let torrent = Arc::clone(&context.torrent);
         self.create_instance_internal(context).await?;
@@ -343,6 +582,8 @@ impl AppState {
         config: FakerConfig,
         auto_started: bool,
     ) -> Result<(), String> {
+        let mut config = config;
+        self.apply_forwarded_port_to_config(&mut config);
         let context = InstanceBuildContext::new(id, torrent, config, InstanceSource::WatchFolder);
         let torrent = Arc::clone(&context.torrent);
         self.create_instance_internal(context).await?;
@@ -358,7 +599,15 @@ impl AppState {
     }
 
     async fn create_instance_internal(&self, context: InstanceBuildContext) -> Result<(), String> {
-        set_instance_context_str(Some(&context.id));
+        set_instance_context_str(Some(context.summary.name.as_str()));
+
+        if let Some(existing_id) =
+            self.duplicate_instance_id(&context.id, &context.torrent.info_hash).await
+        {
+            return Err(format!(
+                "Duplicate torrent skipped: already imported as instance {existing_id}"
+            ));
+        }
 
         let id = context.id.clone();
         let existing = self.collect_existing_instance_state(&context).await;
@@ -420,6 +669,8 @@ impl AppState {
             tracing::warn!("Failed to save state after deleting instance: {}", e);
         }
 
+        self.refresh_peer_listener_port().await;
+
         Ok(())
     }
 
@@ -444,6 +695,51 @@ impl AppState {
         result
     }
 
+    pub async fn apply_vpn_forwarded_port(&self, port: u16) -> Result<usize, String> {
+        self.set_current_forwarded_port(Some(port));
+
+        let mut instances = self.instances.write().await;
+        let mut updated = 0usize;
+
+        for instance in instances.values_mut() {
+            if !instance.config.vpn_port_sync || instance.config.port == port {
+                continue;
+            }
+
+            let mut config = instance.config.clone();
+            config.port = port;
+
+            let mut faker_config = config.clone();
+            Self::apply_cumulative_totals(
+                &mut faker_config,
+                instance.cumulative_uploaded,
+                instance.cumulative_downloaded,
+            );
+
+            let state = instance.faker.stats_snapshot().state;
+            let is_running =
+                matches!(state, FakerState::Starting | FakerState::Running | FakerState::Paused);
+
+            if is_running {
+                instance.faker.set_runtime_port(port).await;
+            } else {
+                instance
+                    .faker
+                    .update_config(faker_config, Some(self.http_client.clone()))
+                    .await
+                    .map_err(|e| format!("Failed to update synced port: {e}"))?;
+            }
+
+            instance.config = config;
+            updated += 1;
+        }
+
+        drop(instances);
+        self.refresh_peer_listener_port().await;
+
+        Ok(updated)
+    }
+
     pub async fn get_instance_info_for_delete(
         &self,
         id: &str,
@@ -457,6 +753,16 @@ impl AppState {
         for (id, instance) in instances.iter() {
             if &instance.torrent_info_hash == info_hash {
                 return Some(id.clone());
+            }
+        }
+        None
+    }
+
+    pub async fn duplicate_instance_id(&self, id: &str, info_hash: &[u8; 20]) -> Option<String> {
+        let instances = self.instances.read().await;
+        for (existing_id, instance) in instances.iter() {
+            if existing_id != id && &instance.torrent_info_hash == info_hash {
+                return Some(existing_id.clone());
             }
         }
         None
@@ -558,7 +864,12 @@ impl AppState {
                 id: id.clone(),
                 name: instance.summary.name.clone(),
                 info_hash: hex::encode(instance.torrent_info_hash),
+                primary_tracker_host: primary_tracker_host(&instance.summary.announce),
                 state: state.to_string(),
+                is_tracker_invalid: stats.tracker_error.is_some(),
+                tracker_error: stats.tracker_error.clone(),
+                tracker_retry_attempt: stats.tracker_retry_attempt,
+                tracker_retry_at_ms: stats.tracker_retry_at_ms,
                 tags: instance.tags.clone(),
                 total_size: instance.summary.total_size,
                 uploaded: stats.uploaded,
@@ -583,6 +894,8 @@ impl AppState {
         context: InstanceBuildContext,
         tags: Vec<String>,
     ) -> Result<(), String> {
+        let mut context = context;
+        self.apply_forwarded_port_to_config(&mut context.config);
         let id = context.id.clone();
         self.create_instance_internal(context).await?;
 
@@ -631,8 +944,11 @@ impl AppState {
         existing: &ExistingInstanceState,
     ) -> FakerConfig {
         let mut faker_config = context.config.clone();
-        faker_config.initial_uploaded = existing.cumulative_uploaded;
-        faker_config.initial_downloaded = existing.cumulative_downloaded;
+        Self::apply_cumulative_totals(
+            &mut faker_config,
+            existing.cumulative_uploaded,
+            existing.cumulative_downloaded,
+        );
         if let Some(completion) = existing.completion_percent {
             faker_config.completion_percent = completion;
         }
@@ -701,6 +1017,8 @@ impl AppState {
             tracing::warn!("Failed to save state after deleting instance: {}", e);
         }
 
+        self.refresh_peer_listener_port().await;
+
         Ok(())
     }
 
@@ -722,6 +1040,97 @@ impl AppState {
         drop(instances);
 
         tracing::info!("All faker instances stopped");
+        self.refresh_peer_listener_port().await;
+    }
+}
+
+impl AppState {
+    fn default_runtime_stats(config: &FakerConfig) -> FakerStats {
+        rustatio_core::RatioFaker::stats_from_config(config)
+    }
+
+    fn runtime_from_stats(stats: &FakerStats) -> PersistedRuntime {
+        PersistedRuntime {
+            uploaded: stats.uploaded,
+            downloaded: stats.downloaded,
+            ratio: stats.ratio,
+            left: stats.left,
+            torrent_completion: stats.torrent_completion,
+            seeders: stats.seeders,
+            leechers: stats.leechers,
+            session_uploaded: stats.session_uploaded,
+            session_downloaded: stats.session_downloaded,
+            session_ratio: stats.session_ratio,
+            elapsed_secs: stats.elapsed_time.as_secs(),
+            current_upload_rate: stats.current_upload_rate,
+            current_download_rate: stats.current_download_rate,
+            average_upload_rate: stats.average_upload_rate,
+            average_download_rate: stats.average_download_rate,
+            upload_progress: stats.upload_progress,
+            download_progress: stats.download_progress,
+            ratio_progress: stats.ratio_progress,
+            seed_time_progress: stats.seed_time_progress,
+            effective_stop_at_ratio: stats.effective_stop_at_ratio,
+            eta_ratio_secs: stats.eta_ratio.map(|value| value.as_secs()),
+            eta_uploaded_secs: stats.eta_uploaded.map(|value| value.as_secs()),
+            eta_seed_time_secs: stats.eta_seed_time.map(|value| value.as_secs()),
+            eta_download_completion_secs: stats
+                .eta_download_completion
+                .map(|value| value.as_secs()),
+            stop_condition_met: stats.stop_condition_met,
+            is_idling: stats.is_idling,
+            idling_reason: stats.idling_reason.clone(),
+            tracker_error: stats.tracker_error.clone(),
+            announce_count: stats.announce_count,
+        }
+    }
+
+    fn stats_from_runtime(
+        runtime: &PersistedRuntime,
+        state: FakerState,
+        post_stop_action: rustatio_core::PostStopAction,
+    ) -> FakerStats {
+        FakerStats {
+            uploaded: runtime.uploaded,
+            downloaded: runtime.downloaded,
+            ratio: runtime.ratio,
+            left: runtime.left,
+            torrent_completion: runtime.torrent_completion,
+            seeders: runtime.seeders,
+            leechers: runtime.leechers,
+            state,
+            is_idling: runtime.is_idling,
+            idling_reason: runtime.idling_reason.clone(),
+            tracker_error: runtime.tracker_error.clone(),
+            tracker_retry_attempt: 0,
+            tracker_retry_at_ms: None,
+            session_uploaded: runtime.session_uploaded,
+            session_downloaded: runtime.session_downloaded,
+            session_ratio: runtime.session_ratio,
+            elapsed_time: Duration::from_secs(runtime.elapsed_secs),
+            current_upload_rate: runtime.current_upload_rate,
+            current_download_rate: runtime.current_download_rate,
+            average_upload_rate: runtime.average_upload_rate,
+            average_download_rate: runtime.average_download_rate,
+            upload_progress: runtime.upload_progress,
+            download_progress: runtime.download_progress,
+            ratio_progress: runtime.ratio_progress,
+            seed_time_progress: runtime.seed_time_progress,
+            effective_stop_at_ratio: runtime.effective_stop_at_ratio,
+            eta_ratio: runtime.eta_ratio_secs.map(Duration::from_secs),
+            eta_uploaded: runtime.eta_uploaded_secs.map(Duration::from_secs),
+            eta_seed_time: runtime.eta_seed_time_secs.map(Duration::from_secs),
+            eta_download_completion: runtime.eta_download_completion_secs.map(Duration::from_secs),
+            upload_rate_history: Vec::new(),
+            download_rate_history: Vec::new(),
+            ratio_history: Vec::new(),
+            history_timestamps: Vec::new(),
+            last_announce: None,
+            next_announce: None,
+            announce_count: runtime.announce_count,
+            stop_condition_met: runtime.stop_condition_met,
+            post_stop_action,
+        }
     }
 }
 
@@ -736,5 +1145,406 @@ impl EventBroadcaster for AppState {
 
     fn emit_instance_event(&self, event: InstanceEvent) {
         let _ = self.instance_sender.send(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustatio_core::{FakerConfig, FakerState, PostStopAction, PresetSettings, TorrentInfo};
+
+    fn torrent() -> TorrentInfo {
+        torrent_with_hash(7)
+    }
+
+    fn torrent_with_hash(byte: u8) -> TorrentInfo {
+        TorrentInfo {
+            info_hash: [byte; 20],
+            announce: "https://tracker.test/announce".to_string(),
+            announce_list: None,
+            name: "sample".to_string(),
+            total_size: 1024,
+            piece_length: 256,
+            num_pieces: 4,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            is_single_file: true,
+            file_count: 1,
+            files: Vec::new(),
+        }
+    }
+
+    async fn set_instance_state(state: &AppState, id: &str, faker_state: FakerState) {
+        let instances = state.instances.read().await;
+        let instance = instances.get(id);
+        assert!(instance.is_some());
+        if let Some(instance) = instance {
+            let mut stats = instance.faker.stats_snapshot();
+            stats.state = faker_state;
+            instance.faker.restore_snapshot(stats).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_vpn_forwarded_port_updates_only_synced_instances() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = temp.unwrap_or_else(|_| panic!("failed to create tempdir"));
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let synced = FakerConfig { vpn_port_sync: true, port: 6881, ..FakerConfig::default() };
+
+        let fixed = FakerConfig { vpn_port_sync: false, port: 60000, ..FakerConfig::default() };
+
+        let created_synced = state.create_instance("synced", torrent(), synced).await;
+        assert!(created_synced.is_ok());
+        let created_fixed = state.create_instance("fixed", torrent_with_hash(8), fixed).await;
+        assert!(created_fixed.is_ok());
+
+        let applied = state.apply_vpn_forwarded_port(51413).await;
+        assert!(applied.is_ok());
+        assert_eq!(applied.unwrap_or_default(), 1);
+
+        let instances = state.list_instances().await;
+        let synced_inst = instances.iter().find(|inst| inst.id == "synced");
+        assert!(synced_inst.is_some());
+        assert_eq!(synced_inst.map(|inst| inst.config.port), Some(51413));
+
+        let fixed_inst = instances.iter().find(|inst| inst.id == "fixed");
+        assert!(fixed_inst.is_some());
+        assert_eq!(fixed_inst.map(|inst| inst.config.port), Some(60000));
+    }
+
+    #[tokio::test]
+    async fn effective_default_config_uses_forwarded_port_when_sync_enabled() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = temp.unwrap_or_else(|_| panic!("failed to create tempdir"));
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let config = FakerConfig { vpn_port_sync: true, port: 6881, ..FakerConfig::default() };
+
+        let saved = state.set_default_config(Some(config)).await;
+        assert!(saved.is_ok());
+        state.set_current_forwarded_port(Some(45123));
+
+        let effective = state.get_effective_default_config().await;
+        assert!(effective.vpn_port_sync);
+        assert_eq!(effective.port, 45123);
+    }
+
+    #[tokio::test]
+    async fn update_instance_config_uses_forwarded_port_when_sync_enabled() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = temp.unwrap_or_else(|_| panic!("failed to create tempdir"));
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let config = FakerConfig { vpn_port_sync: true, port: 6881, ..FakerConfig::default() };
+
+        let created = state.create_instance("synced", torrent(), config).await;
+        assert!(created.is_ok());
+
+        state.set_current_forwarded_port(Some(51413));
+
+        let updated = state
+            .update_instance_config(
+                "synced",
+                FakerConfig { vpn_port_sync: true, port: 6881, ..FakerConfig::default() },
+            )
+            .await;
+        assert!(updated.is_ok());
+
+        let instances = state.list_instances().await;
+        let synced_inst = instances.iter().find(|inst| inst.id == "synced");
+        assert!(synced_inst.is_some());
+        assert_eq!(synced_inst.map(|inst| inst.config.port), Some(51413));
+    }
+
+    #[tokio::test]
+    async fn update_instance_config_only_persists_vpn_sync_flag() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = temp.unwrap_or_else(|_| panic!("failed to create tempdir"));
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let created = state.create_instance("synced", torrent(), FakerConfig::default()).await;
+        assert!(created.is_ok());
+
+        state.set_current_forwarded_port(Some(51413));
+
+        let updated = state
+            .update_instance_config_only(
+                "synced",
+                FakerConfig { vpn_port_sync: true, port: 6881, ..FakerConfig::default() },
+            )
+            .await;
+        assert!(updated.is_ok());
+
+        let reloaded = state.persistence.load().await;
+        let persisted = reloaded.instances.get("synced");
+        assert!(persisted.is_some());
+        assert_eq!(persisted.map(|inst| inst.config.vpn_port_sync), Some(true));
+        assert_eq!(persisted.map(|inst| inst.config.port), Some(51413));
+    }
+
+    #[tokio::test]
+    async fn apply_vpn_forwarded_port_updates_running_instance_port_immediately() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = temp.unwrap_or_else(|_| panic!("failed to create tempdir"));
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let created = state
+            .create_instance(
+                "synced",
+                torrent(),
+                FakerConfig { vpn_port_sync: true, port: 40000, ..FakerConfig::default() },
+            )
+            .await;
+        assert!(created.is_ok());
+
+        let started = state.start_instance("synced").await;
+        assert!(started.is_ok());
+
+        let applied = state.apply_vpn_forwarded_port(51413).await;
+        assert!(applied.is_ok());
+        assert_eq!(applied.unwrap_or_default(), 1);
+
+        let instances = state.list_instances().await;
+        let synced_inst = instances.iter().find(|inst| inst.id == "synced");
+        assert!(synced_inst.is_some());
+        assert_eq!(synced_inst.map(|inst| inst.config.port), Some(51413));
+    }
+
+    #[tokio::test]
+    async fn desired_peer_port_rejects_mixed_forwarded_and_manual_active_ports() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = temp.unwrap_or_else(|_| panic!("failed to create tempdir"));
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let created_synced = state
+            .create_instance(
+                "synced",
+                torrent(),
+                FakerConfig { vpn_port_sync: true, port: 64429, ..FakerConfig::default() },
+            )
+            .await;
+        assert!(created_synced.is_ok());
+
+        let created_manual = state
+            .create_instance(
+                "manual",
+                torrent_with_hash(8),
+                FakerConfig { vpn_port_sync: false, port: 50000, ..FakerConfig::default() },
+            )
+            .await;
+        assert!(created_manual.is_ok());
+
+        set_instance_state(&state, "synced", FakerState::Running).await;
+        set_instance_state(&state, "manual", FakerState::Running).await;
+        state.set_current_forwarded_port(Some(53226));
+
+        let desired = state.desired_peer_port_from_instances().await;
+        assert!(desired.is_err());
+        assert_eq!(
+            desired.err(),
+            Some("multiple active peer ports configured: 53226, 50000".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn save_and_load_restores_paused_runtime_state() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = match temp {
+            Ok(value) => value,
+            Err(e) => panic!("failed to create tempdir: {e}"),
+        };
+        let path = temp.path().to_string_lossy().to_string();
+        let state = AppState::new(&path);
+
+        let created = state.create_instance("paused", torrent(), FakerConfig::default()).await;
+        assert!(created.is_ok());
+
+        {
+            let instances = state.instances.read().await;
+            let instance = instances.get("paused");
+            assert!(instance.is_some());
+            if let Some(instance) = instance {
+                let mut stats = instance.faker.stats_snapshot();
+                stats.state = FakerState::Paused;
+                stats.uploaded = 7_000;
+                stats.downloaded = 3_000;
+                stats.ratio = 6.8359;
+                stats.session_uploaded = 2_000;
+                stats.session_downloaded = 500;
+                stats.session_ratio = 1.9531;
+                stats.elapsed_time = Duration::from_hours(2);
+                stats.seed_time_progress = 50.0;
+                stats.stop_condition_met = false;
+                stats.post_stop_action = PostStopAction::Idle;
+                instance.faker.restore_snapshot(stats).await;
+            }
+        }
+
+        let saved = state.save_state().await;
+        assert!(saved.is_ok());
+
+        let restored = AppState::new(&path);
+        let loaded = restored.load_saved_state().await;
+        assert!(loaded.is_ok());
+        let restored_count = loaded.unwrap_or(0);
+        assert_eq!(restored_count, 1);
+
+        let instances = restored.list_instances().await;
+        assert_eq!(instances.len(), 1);
+        let stats = &instances[0].stats;
+        assert!(matches!(stats.state, FakerState::Paused));
+        assert_eq!(stats.uploaded, 7_000);
+        assert_eq!(stats.downloaded, 3_000);
+        assert_eq!(stats.session_uploaded, 2_000);
+        assert_eq!(stats.session_downloaded, 500);
+        assert_eq!(stats.elapsed_time.as_secs(), 7200);
+        assert_eq!(stats.seed_time_progress, 50.0);
+    }
+
+    #[tokio::test]
+    async fn custom_and_default_presets_persist_to_state_file() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = match temp {
+            Ok(value) => value,
+            Err(e) => panic!("failed to create tempdir: {e}"),
+        };
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let preset = CustomPreset {
+            id: "custom-one".to_string(),
+            name: "Custom One".to_string(),
+            description: "Saved on server".to_string(),
+            icon: "star".to_string(),
+            custom: true,
+            created_at: "2026-03-24T00:00:00Z".to_string(),
+            settings: PresetSettings { upload_rate: Some(123.0), ..PresetSettings::default() },
+        };
+
+        let saved_preset = state.upsert_custom_preset(preset.clone()).await;
+        assert!(saved_preset.is_ok());
+
+        let default_saved = state
+            .set_default_preset(Some(DefaultPreset {
+                id: preset.id.clone(),
+                name: preset.name.clone(),
+                settings: preset.settings.clone(),
+            }))
+            .await;
+        assert!(default_saved.is_ok());
+
+        let persisted = state.persistence.load().await;
+        assert_eq!(persisted.custom_presets.len(), 1);
+        assert_eq!(persisted.custom_presets[0].id, "custom-one");
+        assert_eq!(
+            persisted.default_preset.as_ref().map(|item| item.id.as_str()),
+            Some("custom-one")
+        );
+        assert_eq!(
+            persisted.default_preset.as_ref().map(|item| item.name.as_str()),
+            Some("Custom One")
+        );
+        assert_eq!(persisted.default_config.as_ref().map(|cfg| cfg.upload_rate), Some(123.0));
+    }
+
+    #[tokio::test]
+    async fn duplicate_instance_id_ignores_same_id_but_finds_other_instances() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = temp.unwrap_or_else(|_| panic!("failed to create tempdir"));
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let one = state.create_instance("one", torrent(), FakerConfig::default()).await;
+        assert!(one.is_ok());
+
+        let same = state.duplicate_instance_id("one", &[7u8; 20]).await;
+        assert!(same.is_none());
+
+        let other = state.duplicate_instance_id("two", &[7u8; 20]).await;
+        assert_eq!(other.as_deref(), Some("one"));
+    }
+
+    #[tokio::test]
+    async fn save_and_load_restores_tracker_error_runtime_state() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = match temp {
+            Ok(value) => value,
+            Err(e) => panic!("failed to create tempdir: {e}"),
+        };
+        let path = temp.path().to_string_lossy().to_string();
+        let state = AppState::new(&path);
+
+        let created = state.create_instance("invalid", torrent(), FakerConfig::default()).await;
+        assert!(created.is_ok());
+
+        {
+            let instances = state.instances.read().await;
+            let instance = instances.get("invalid");
+            assert!(instance.is_some());
+            if let Some(instance) = instance {
+                let mut stats = instance.faker.stats_snapshot();
+                stats.state = FakerState::Stopped;
+                stats.tracker_error = Some("Torrent not found on tracker".to_string());
+                stats.current_upload_rate = 0.0;
+                stats.current_download_rate = 0.0;
+                instance.faker.restore_snapshot(stats).await;
+            }
+        }
+
+        let saved = state.save_state().await;
+        assert!(saved.is_ok());
+
+        let restored = AppState::new(&path);
+        let loaded = restored.load_saved_state().await;
+        assert!(loaded.is_ok());
+
+        let instances = restored.list_instances().await;
+        assert_eq!(instances.len(), 1);
+        let stats = &instances[0].stats;
+        assert!(matches!(stats.state, FakerState::Stopped));
+        assert_eq!(stats.tracker_error.as_deref(), Some("Torrent not found on tracker"));
+    }
+
+    #[tokio::test]
+    async fn bulk_update_configs_persists_successful_updates() {
+        let temp = tempfile::tempdir();
+        assert!(temp.is_ok());
+        let temp = temp.unwrap_or_else(|_| panic!("failed to create tempdir"));
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let created = state.create_instance("bulk", torrent(), FakerConfig::default()).await;
+        assert!(created.is_ok());
+
+        let updated = FakerConfig {
+            upload_rate: 333.0,
+            port: 51413,
+            stop_at_ratio: Some(4.0),
+            ..FakerConfig::default()
+        };
+
+        let (succeeded, failed) =
+            state.bulk_update_configs(vec![("bulk".to_string(), updated.clone())]).await;
+
+        assert_eq!(succeeded, vec!["bulk".to_string()]);
+        assert!(failed.is_empty());
+
+        let persisted = state.persistence.load().await;
+        let saved = persisted.instances.get("bulk");
+        assert!(saved.is_some());
+        let saved = saved.unwrap_or_else(|| unreachable!());
+        assert_eq!(saved.config.upload_rate, updated.upload_rate);
+        assert_eq!(saved.config.port, updated.port);
+        assert_eq!(saved.config.stop_at_ratio, updated.stop_at_ratio);
     }
 }

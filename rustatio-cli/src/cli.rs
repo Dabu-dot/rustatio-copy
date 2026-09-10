@@ -32,7 +32,7 @@ pub enum Commands {
         #[arg(short, long, value_enum, default_value = "qbittorrent")]
         client: ClientArg,
 
-        /// Client version string (e.g., "5.1.4")
+        /// Client version string (e.g., "5.2.0")
         #[arg(long, value_name = "VERSION")]
         client_version: Option<String>,
 
@@ -91,6 +91,18 @@ pub enum Commands {
         /// Randomization range percentage (default: 20%)
         #[arg(long, default_value = "20.0", value_name = "PERCENT")]
         random_range: f64,
+
+        /// Randomize the stop ratio target within a percentage range
+        #[arg(long)]
+        randomize_ratio: bool,
+
+        /// Randomization range percentage for stop ratio (default: 10%)
+        #[arg(long, default_value = "10.0", value_name = "PERCENT")]
+        random_ratio_range: f64,
+
+        /// Action to take when stop conditions are met
+        #[arg(long, value_enum, default_value = "idle")]
+        post_stop_action: PostStopActionArg,
 
         /// Enable progressive rate adjustment
         #[arg(long)]
@@ -239,6 +251,7 @@ pub enum ClientArg {
     Transmission,
     Deluge,
     Bittorrent,
+    Rtorrent,
 }
 
 impl From<ClientArg> for rustatio_core::ClientType {
@@ -249,6 +262,27 @@ impl From<ClientArg> for rustatio_core::ClientType {
             ClientArg::Transmission => Self::Transmission,
             ClientArg::Deluge => Self::Deluge,
             ClientArg::Bittorrent => Self::BitTorrent,
+            ClientArg::Rtorrent => Self::RTorrent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum PostStopActionArg {
+    /// Stay connected but stop uploading/downloading (default)
+    Idle,
+    /// Send a stop event to the tracker
+    StopSeeding,
+    /// Delete the instance entirely
+    DeleteInstance,
+}
+
+impl From<PostStopActionArg> for rustatio_core::PostStopAction {
+    fn from(action: PostStopActionArg) -> Self {
+        match action {
+            PostStopActionArg::Idle => Self::Idle,
+            PostStopActionArg::StopSeeding => Self::StopSeeding,
+            PostStopActionArg::DeleteInstance => Self::DeleteInstance,
         }
     }
 }

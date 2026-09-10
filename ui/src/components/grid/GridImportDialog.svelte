@@ -5,22 +5,31 @@
   import Label from '$lib/components/ui/label.svelte';
   import Select from '$lib/components/ui/select.svelte';
   import Checkbox from '$lib/components/ui/checkbox.svelte';
+  import InlineHelp from '$lib/components/common/InlineHelp.svelte';
   import BaseModal from '../common/BaseModal.svelte';
   import { gridActions } from '$lib/gridStore.js';
   import { api, getRunMode } from '$lib/api.js';
   import FolderBrowser from './FolderBrowser.svelte';
   import { builtInPresets } from '$lib/presets/index.js';
-  import { getDefaultPreset } from '$lib/defaultPreset.js';
+  import { getDefaultPreset, refreshDefaultPreset } from '$lib/defaultPreset.js';
+  import { normalizePreset, normalizePresets } from '$lib/customPreset.js';
   import { Upload, FolderOpen, X, FileText, ChevronDown, Settings } from '@lucide/svelte';
   import PresetIcon from '../config/PresetIcon.svelte';
   import ClientIcon from '../config/ClientIcon.svelte';
-  import ClientSelect from '../config/ClientSelect.svelte';
-  import VersionSelect from '../config/VersionSelect.svelte';
   import RandomizationSettings from '../config/RandomizationSettings.svelte';
   import ProgressiveRateSettings from '../config/ProgressiveRateSettings.svelte';
   import StopConditionSettings from '../config/StopConditionSettings.svelte';
+  import GridClientConfigFields from './GridClientConfigFields.svelte';
 
-  let { isOpen = $bindable(false) } = $props();
+  let {
+    isOpen = $bindable(false),
+    vpnPortSyncVisible = false,
+    currentForwardedPort = null,
+    vpnPortSyncEnabled = true,
+    networkStatusConfigured = true,
+    networkStatusError = null,
+    onRefreshNetworkStatus = () => {},
+  } = $props();
 
   const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
   const isServer = getRunMode() === 'server';
@@ -54,6 +63,7 @@
   let selectedClient = $state('');
   let selectedVersion = $state('');
   let port = $state(6881);
+  let vpnPortSync = $state(false);
 
   // Preset selection
   let selectedPresetId = $state('');
@@ -69,6 +79,8 @@
   let progressiveDurationHours = $state(1);
   let stopAtRatioEnabled = $state(false);
   let stopAtRatio = $state(2.0);
+  let randomizeRatio = $state(false);
+  let randomRatioRangePercent = $state(10);
   let stopAtUploadedEnabled = $state(false);
   let stopAtUploadedGB = $state(10);
   let stopAtDownloadedEnabled = $state(false);
@@ -83,18 +95,17 @@
   let importing = $state(false);
   let importResult = $state(null);
 
-  // Custom presets from localStorage
-  const CUSTOM_PRESETS_KEY = 'rustatio-custom-presets';
-  function loadCustomPresets() {
+  let customPresets = $state([]);
+  let allPresets = $derived([...builtInPresets, ...normalizePresets(customPresets)]);
+
+  async function loadPresetState() {
     try {
-      const stored = localStorage.getItem(CUSTOM_PRESETS_KEY);
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
+      customPresets = normalizePresets((await api.listCustomPresets()) || []);
+      await refreshDefaultPreset();
+    } catch (e) {
+      console.warn('Failed to load presets:', e);
     }
   }
-
-  let allPresets = $derived([...builtInPresets, ...loadCustomPresets()]);
 
   let completionPercent = $derived(
     mode === 'seed' ? 100 : mode === 'leech' ? 0 : parseFloat(customPercent) || 50
@@ -129,20 +140,23 @@
         .catch(() => {});
     }
     if (isOpen) {
-      const defaultPreset = getDefaultPreset();
-      if (defaultPreset && !selectedPresetId) {
-        applyPreset(defaultPreset);
-        selectedPresetId = defaultPreset.id;
-      }
+      loadPresetState().then(() => {
+        const defaultPreset = getDefaultPreset();
+        if (defaultPreset && !selectedPresetId) {
+          applyPreset(defaultPreset);
+          selectedPresetId = defaultPreset.id;
+        }
+      });
     }
   });
 
   function applyPreset(preset) {
-    const s = preset.settings || {};
+    const s = normalizePreset(preset)?.settings || {};
 
     if (s.uploadRate != null) uploadRate = s.uploadRate;
     if (s.downloadRate != null) downloadRate = s.downloadRate;
     if (s.port != null) port = s.port;
+    if (s.vpnPortSync != null) vpnPortSync = s.vpnPortSync;
     if (s.selectedClient != null) selectedClient = s.selectedClient;
     if (s.selectedClientVersion != null) selectedVersion = s.selectedClientVersion;
 
@@ -163,6 +177,8 @@
     if (s.progressiveDurationHours != null) progressiveDurationHours = s.progressiveDurationHours;
     if (s.stopAtRatioEnabled != null) stopAtRatioEnabled = s.stopAtRatioEnabled;
     if (s.stopAtRatio != null) stopAtRatio = s.stopAtRatio;
+    if (s.randomizeRatio != null) randomizeRatio = s.randomizeRatio;
+    if (s.randomRatioRangePercent != null) randomRatioRangePercent = s.randomRatioRangePercent;
     if (s.stopAtUploadedEnabled != null) stopAtUploadedEnabled = s.stopAtUploadedEnabled;
     if (s.stopAtUploadedGB != null) stopAtUploadedGB = s.stopAtUploadedGB;
     if (s.stopAtDownloadedEnabled != null) stopAtDownloadedEnabled = s.stopAtDownloadedEnabled;
@@ -260,6 +276,42 @@
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
+  function handleVpnPortSyncChange(checked) {
+    if (!vpnPortSyncVisible) {
+      return;
+    }
+
+    if (checked && vpnPortSyncBlocked) {
+      return;
+    }
+
+    vpnPortSync = checked;
+    if (checked && currentForwardedPort) {
+      port = currentForwardedPort;
+    }
+  }
+
+  $effect(() => {
+    if (
+      vpnPortSyncVisible &&
+      vpnPortSync &&
+      vpnPortSyncEnabled &&
+      currentForwardedPort &&
+      port !== currentForwardedPort
+    ) {
+      port = currentForwardedPort;
+    }
+  });
+
+  let networkStatusUnavailable = $derived(networkStatusError === 'unavailable');
+  let vpnPortSyncBlocked = $derived(
+    !networkStatusConfigured || !vpnPortSyncEnabled || networkStatusUnavailable
+  );
+  let useSyncedPort = $derived(
+    vpnPortSyncVisible && vpnPortSync && networkStatusConfigured && vpnPortSyncEnabled
+  );
+  let disableVpnPortSyncToggle = $derived(vpnPortSyncBlocked && !vpnPortSync);
+
   function buildConfig() {
     const tags = tagsInput
       .split(',')
@@ -294,6 +346,7 @@
       uploadRate: resolvedUploadRate,
       downloadRate: resolvedDownloadRate,
       port: parseInt(port) || 6881,
+      vpnPortSync,
       selectedClient: selectedClient || undefined,
       selectedClientVersion: selectedVersion || undefined,
       completionPercent,
@@ -301,6 +354,8 @@
       randomRangePercent: parseFloat(randomRangePercent),
       stopAtRatioEnabled,
       stopAtRatio: stopAtRatioEnabled ? parseFloat(stopAtRatio) : undefined,
+      randomizeRatio,
+      randomRatioRangePercent: parseFloat(randomRatioRangePercent),
       stopAtUploadedEnabled,
       stopAtUploadedGB: stopAtUploadedEnabled ? parseFloat(stopAtUploadedGB) : undefined,
       stopAtDownloadedEnabled,
@@ -379,6 +434,7 @@
     selectedClient = '';
     selectedVersion = '';
     port = 6881;
+    vpnPortSync = false;
     selectedPresetId = '';
     presetDropdownOpen = false;
     randomizeRates = true;
@@ -389,6 +445,8 @@
     progressiveDurationHours = 1;
     stopAtRatioEnabled = false;
     stopAtRatio = 2.0;
+    randomizeRatio = false;
+    randomRatioRangePercent = 10;
     stopAtUploadedEnabled = false;
     stopAtUploadedGB = 10;
     stopAtDownloadedEnabled = false;
@@ -721,67 +779,103 @@
       </div>
 
       <!-- Rates -->
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <Label>Upload Rate (KB/s)</Label>
-          <Input type="number" bind:value={uploadRate} min="0" step="1" class="mt-1 text-xs" />
-        </div>
-        <div>
-          <Label>Download Rate (KB/s)</Label>
-          <Input type="number" bind:value={downloadRate} min="0" step="1" class="mt-1 text-xs" />
-        </div>
-      </div>
+      <GridClientConfigFields
+        mode="rates"
+        class="grid-cols-2"
+        bind:uploadRate
+        bind:downloadRate
+        uploadLabel="Upload Rate (KB/s)"
+        downloadLabel="Download Rate (KB/s)"
+        labelClass=""
+        inputClass="mt-1 text-xs"
+        inputStep="1"
+      />
 
       <!-- Timing -->
-      <div class="grid grid-cols-2 gap-3">
-        <div>
-          <Label>Refresh Interval (sec)</Label>
-          <Input
-            type="number"
-            bind:value={updateIntervalSeconds}
-            min="1"
-            max="300"
-            step="1"
-            class="mt-1 text-xs"
-            onblur={handleRefreshIntervalBlur}
-          />
-        </div>
-        <div>
-          <Label>Scrape Interval (sec)</Label>
-          <Input
-            type="number"
-            bind:value={scrapeInterval}
-            min="10"
-            max="3600"
-            step="1"
-            class="mt-1 text-xs"
-            onblur={handleScrapeIntervalBlur}
-          />
-        </div>
-      </div>
+      <GridClientConfigFields
+        mode="timing"
+        class="grid-cols-2"
+        bind:updateIntervalSeconds
+        bind:scrapeInterval
+        refreshLabel="Refresh Interval (sec)"
+        scrapeLabel="Scrape Interval (sec)"
+        labelClass=""
+        inputClass="mt-1 text-xs"
+        onRefreshBlur={handleRefreshIntervalBlur}
+        onScrapeBlur={handleScrapeIntervalBlur}
+      />
 
       <!-- Client Selection -->
       <div>
-        <div class="flex items-center gap-2 mb-2">
-          <ClientIcon clientId={selectedClient} size={16} />
-          <Label>Client</Label>
-        </div>
-        <div class="grid grid-cols-3 gap-3">
-          <ClientSelect clients={clientTypes} bind:value={selectedClient} />
-          {#if selectedClient && clientVersions.length > 0}
-            <VersionSelect versions={clientVersions} bind:value={selectedVersion} />
-          {/if}
-          <div>
-            <Input
-              type="number"
-              bind:value={port}
-              min="1024"
-              max="65535"
-              placeholder="Port"
-              class="h-9"
-            />
+        <div class="mb-2 flex items-center justify-between gap-3">
+          <div class="flex items-center gap-2">
+            <ClientIcon clientId={selectedClient} size={16} />
+            <Label>Client</Label>
           </div>
+          {#if vpnPortSyncVisible}
+            <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Checkbox
+                checked={vpnPortSync}
+                disabled={disableVpnPortSyncToggle}
+                id="grid-vpn-port-sync"
+                onchange={handleVpnPortSyncChange}
+              />
+              <Label for="grid-vpn-port-sync" class="cursor-pointer">VPN sync</Label>
+              <InlineHelp text="Imported instances will sync their announce port from Gluetun." />
+            </div>
+          {/if}
         </div>
+        <GridClientConfigFields
+          class="grid-cols-3"
+          clients={clientTypes}
+          versions={clientVersions}
+          bind:selectedClient
+          bind:selectedVersion
+          bind:port
+          showVersion={selectedClient && clientVersions.length > 0}
+          portDisabled={useSyncedPort}
+          portInputClass="h-9"
+        >
+          {#snippet portFooter()}
+            {#if vpnPortSyncVisible && !networkStatusConfigured}
+              <p class="mt-1 text-[11px] text-amber-400">No VPN configured.</p>
+            {:else if vpnPortSyncVisible && !vpnPortSyncEnabled && vpnPortSync}
+              <p class="mt-1 text-[11px] text-amber-400">
+                VPN sync is disabled on the server. Uncheck it or enable
+                <span class="font-mono">VPN_PORT_SYNC=on</span> and restart Rustatio.
+              </p>
+            {:else if vpnPortSyncVisible && !vpnPortSyncEnabled}
+              <p class="mt-1 text-[11px] text-amber-400">
+                VPN sync is disabled on the server. Set <span class="font-mono"
+                  >VPN_PORT_SYNC=on</span
+                >
+                and restart Rustatio.
+              </p>
+            {:else if vpnPortSyncVisible && networkStatusUnavailable}
+              <div class="mt-1 flex items-center gap-2 text-[11px] text-amber-400">
+                <span>Gluetun status is unavailable.</span>
+                <button
+                  type="button"
+                  class="underline underline-offset-2 hover:text-amber-300"
+                  onclick={onRefreshNetworkStatus}
+                >
+                  Retry
+                </button>
+              </div>
+            {:else if vpnPortSyncVisible && useSyncedPort && !currentForwardedPort}
+              <p class="mt-1 text-[11px] text-amber-400">
+                Waiting for a forwarded port from Gluetun. Make sure <span class="font-mono"
+                  >VPN_PORT_FORWARDING=on</span
+                >
+                is enabled and the VPN provider supports it.
+              </p>
+            {:else if vpnPortSyncVisible && useSyncedPort && currentForwardedPort}
+              <p class="mt-1 text-[11px] text-foreground/80">
+                Current forwarded port: <span class="font-mono">{currentForwardedPort}</span>
+              </p>
+            {/if}
+          {/snippet}
+        </GridClientConfigFields>
       </div>
 
       <!-- Tags -->
@@ -854,6 +948,8 @@
               <StopConditionSettings
                 bind:stopAtRatioEnabled
                 bind:stopAtRatio
+                bind:randomizeRatio
+                bind:randomRatioRangePercent
                 bind:stopAtUploadedEnabled
                 bind:stopAtUploadedGB
                 bind:stopAtDownloadedEnabled
@@ -883,6 +979,17 @@
             {importResult.error}
           {:else}
             {importResult.imported?.length || 0} torrent(s) imported successfully
+            {#if importResult.duplicates?.length > 0}
+              <div class="mt-1 text-xs text-warning">
+                {importResult.duplicates.length} duplicate(s) skipped:
+                {#each importResult.duplicates.slice(0, 3) as duplicate, idx (idx)}
+                  <div>{duplicate}</div>
+                {/each}
+                {#if importResult.duplicates.length > 3}
+                  <div>...and {importResult.duplicates.length - 3} more</div>
+                {/if}
+              </div>
+            {/if}
             {#if importResult.errors?.length > 0}
               <div class="mt-1 text-xs text-stat-ratio">
                 {importResult.errors.length} error(s):

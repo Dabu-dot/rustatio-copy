@@ -21,12 +21,13 @@
     activeInstanceId,
     instanceActions,
     saveSession,
+    computeEffectiveRatio,
   } from './lib/instanceStore.js';
+  import { getPausedStatus, getRunningStatus, getStatusFromStats } from './lib/status.js';
 
   // Import components
   import Header from './components/layout/Header.svelte';
   import Sidebar from './components/layout/Sidebar.svelte';
-  import StatusBar from './components/layout/StatusBar.svelte';
   import TorrentSelector from './components/common/TorrentSelector.svelte';
   import ConfigurationForm from './components/config/ConfigurationForm.svelte';
   import StopConditions from './components/config/StopConditions.svelte';
@@ -40,9 +41,12 @@
   import ThemeIcon from './components/common/ThemeIcon.svelte';
   import DownloadButton from './components/common/DownloadButton.svelte';
   import AuthPage from './components/common/AuthPage.svelte';
+  import BaseModal from './components/common/BaseModal.svelte';
+  import Button from './lib/components/ui/button.svelte';
   import ConfirmDialog from './components/common/ConfirmDialog.svelte';
   import GridView from './components/grid/GridView.svelte';
   import WatchView from './components/watch/WatchView.svelte';
+  import { buildFakerConfig, getCalculatedInitialDownloaded } from './lib/fakerConfig.js';
 
   // Import grid store
   import { viewMode } from './lib/gridStore.js';
@@ -63,6 +67,7 @@
 
   // Check if running in Tauri
   const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  let isServerMode = $derived(getRunMode() === 'server');
 
   // Loading state to prevent UI flash during initialization
   let isInitialized = $state(false);
@@ -70,6 +75,10 @@
   // Authentication state
   let showAuthDialog = $state(false);
   let closePromptVisible = $state(false);
+  let rememberCloseChoice = $state(false);
+  let errorDialogOpen = $state(false);
+  let errorDialogTitle = $state('Error');
+  let errorDialogMessage = $state('');
 
   // Flag to prevent store subscriptions from firing during initialization
   let isInitializing = true;
@@ -103,6 +112,18 @@
     }
   }
 
+  function getForwardedPort(status) {
+    return status?.forwarded_port ?? status?.forwardedPort ?? null;
+  }
+
+  function isNetworkConfigured(status) {
+    return status?.configured !== false;
+  }
+
+  function getVpnPortSyncEnabled(status) {
+    return isNetworkConfigured(status) && (status?.vpn_port_sync_enabled ?? true);
+  }
+
   // Store cleanup functions
   let unsubActiveInstance = null;
   let unsubSessionSave = null;
@@ -111,7 +132,11 @@
   let instanceEventsCleanup = null;
   let closeRequestedCleanup = null;
   let desktopReconcileIntervalId = null;
-
+  let trackerRetryIntervalId = null;
+  let networkStatusIntervalId = null;
+  let networkStatus = $state(null);
+  let networkStatusLoading = $state(false);
+  let networkStatusError = $state(null);
   // Debounce timer for syncing config to server
   let configSyncTimeout = null;
 
@@ -120,6 +145,7 @@
 
   // Track previous client to detect changes
   let previousClient = null;
+  let previousClientInstanceId = null;
 
   // Global error handler
   if (typeof window !== 'undefined') {
@@ -132,6 +158,46 @@
     window.addEventListener('unhandledrejection', event => {
       console.error('Unhandled promise rejection:', event.reason);
     });
+  }
+
+  async function refreshNetworkStatus() {
+    networkStatusLoading = true;
+    networkStatusError = null;
+
+    try {
+      const result = await api.getNetworkStatus();
+      if (result) {
+        networkStatus = result;
+        if (isNetworkConfigured(result) === false) {
+          stopNetworkStatusPolling();
+        }
+      } else {
+        networkStatus = null;
+        networkStatusError = 'unavailable';
+      }
+    } catch (error) {
+      networkStatusError = error.message || 'Failed to fetch';
+    } finally {
+      networkStatusLoading = false;
+    }
+  }
+
+  function startNetworkStatusPolling() {
+    if (networkStatusIntervalId) return;
+    networkStatusIntervalId = setInterval(refreshNetworkStatus, 15000);
+    refreshNetworkStatus();
+  }
+
+  function stopNetworkStatusPolling() {
+    if (!networkStatusIntervalId) return;
+    clearInterval(networkStatusIntervalId);
+    networkStatusIntervalId = null;
+  }
+
+  function showErrorDialog(title, message) {
+    errorDialogTitle = title;
+    errorDialogMessage = message;
+    errorDialogOpen = true;
   }
 
   // Load configuration on mount
@@ -200,7 +266,9 @@
       if (
         inst.selectedClient &&
         !inst.isRunning &&
+        !inst.vpnPortSync &&
         clientDefaultPorts[inst.selectedClient] &&
+        previousClientInstanceId === inst.id &&
         previousClient !== null &&
         previousClient !== inst.selectedClient
       ) {
@@ -211,6 +279,7 @@
 
       // Track current client for next comparison
       previousClient = inst.selectedClient;
+      previousClientInstanceId = inst.id;
     });
 
     // Config save is handled by saveSession below, so we don't need a separate subscription
@@ -312,7 +381,14 @@
       try {
         const { listen } = await import('@tauri-apps/api/event');
         closeRequestedCleanup = await listen('app-close-requested', () => {
-          closePromptVisible = true;
+          const behavior = localStorage.getItem('rustatio-close-behavior');
+          if (behavior === 'tray') {
+            handleCloseToTray();
+          } else if (behavior === 'quit') {
+            handleQuitFromPrompt();
+          } else {
+            closePromptVisible = true;
+          }
         });
       } catch (error) {
         console.error('Failed to subscribe to close prompt events:', error);
@@ -381,6 +457,8 @@
 
     // Initialize instance store (will restore session from localStorage)
     await instanceActions.initialize();
+    startNetworkStatusPolling();
+    startTrackerRetryPolling();
 
     // Start polling for any instances that were restored in a running state (server mode)
     // This ensures UI updates after page refresh when instances are still running on server
@@ -493,6 +571,9 @@
       window.removeEventListener('beforeunload', beforeUnloadHandler);
     }
 
+    stopNetworkStatusPolling();
+    stopTrackerRetryPolling();
+
     // Clean up config sync timeout
     if (configSyncTimeout) {
       clearTimeout(configSyncTimeout);
@@ -566,11 +647,12 @@
         }
       }, 2000);
     } catch (error) {
+      const message = 'Failed to load torrent: ' + error;
       instanceActions.updateInstance($activeInstance.id, {
-        statusMessage: 'Failed to load torrent: ' + error,
+        statusMessage: message,
         statusType: 'error',
       });
-      alert('Failed to load torrent: ' + error);
+      showErrorDialog('Torrent Load Failed', message);
     }
   }
 
@@ -597,6 +679,18 @@
 
   // Handle auto-stop when a stop condition is met
   async function handleAutoStop(instanceId, stats) {
+    if (stats?.tracker_error) {
+      clearInstanceIntervals(instanceId);
+      instanceActions.updateInstance(instanceId, {
+        isRunning: false,
+        isPaused: false,
+        updateInterval: null,
+        stats,
+        ...getStatusFromStats(stats),
+      });
+      return;
+    }
+
     // In server mode, the scheduler already called stop() when the condition was met.
     // Calling stopFaker again would redundantly re-enter Stopping state (sending
     // another tracker announce), causing the grid to briefly show "Stopping".
@@ -625,6 +719,24 @@
     });
   }
 
+  // Handle post-stop delete action (delete_instance)
+  // Backend stopped the faker; this removes the instance from the frontend store.
+  async function handlePostStopDelete(instanceId, stats) {
+    if (!stats.stop_condition_met || stats.post_stop_action !== 'delete_instance') {
+      return false;
+    }
+
+    clearInstanceIntervals(instanceId);
+
+    // Use removeInstance which creates a replacement empty instance when deleting the last one
+    try {
+      await instanceActions.removeInstance(instanceId, true);
+    } catch (error) {
+      console.warn('Post-stop delete cleanup error:', error);
+    }
+    return true;
+  }
+
   // Handle polling error
   function handlePollingError(instanceId, error) {
     devLog('error', 'Polling error:', error);
@@ -644,22 +756,64 @@
     return stats.state === 'Stopped';
   }
 
-  // Derive status message/type/icon from stats (for idling state)
-  function getStatusFromStats(stats) {
-    if (stats.is_idling) {
-      const reason =
-        stats.idling_reason === 'no_leechers' ? 'No leechers available' : 'No seeders available';
-      return {
-        statusMessage: `Idling - ${reason}`,
-        statusType: 'idling',
-        statusIcon: 'moon',
-      };
+  function shouldRetryTracker(stats) {
+    return stats?.state === 'Stopped' && stats?.tracker_error === 'Tracker unavailable';
+  }
+
+  async function refreshTrackerRetryStatuses() {
+    const currentInstances = get(instances);
+    const retryable = currentInstances.filter(inst => shouldRetryTracker(inst.stats));
+
+    for (const instance of retryable) {
+      try {
+        const stats = await api.getStats(instance.id);
+        instanceActions.updateInstance(instance.id, {
+          isRunning: stats.state !== 'Stopped',
+          isPaused: false,
+          stats,
+          ...getStatusFromStats(stats),
+        });
+
+        if (!shouldRetryTracker(stats)) {
+          if (stats.state !== 'Stopped') {
+            startPollingForInstance(instance.id, instance.updateIntervalSeconds ?? 5);
+          }
+          continue;
+        }
+
+        if (getRunMode() !== 'server' && stats.tracker_retry_at_ms != null) {
+          if (stats.tracker_retry_at_ms <= Date.now()) {
+            const nextStats = await api.recoverTrackerFaker(instance.id);
+            instanceActions.updateInstance(instance.id, {
+              isRunning: nextStats.state !== 'Stopped',
+              isPaused: false,
+              stats: nextStats,
+              ...getStatusFromStats(nextStats),
+            });
+
+            if (nextStats.state !== 'Stopped') {
+              startPollingForInstance(instance.id, instance.updateIntervalSeconds ?? 5);
+            }
+          }
+        }
+      } catch (error) {
+        console.debug('Tracker retry refresh error:', error);
+      }
     }
-    return {
-      statusMessage: 'Actively faking ratio...',
-      statusType: 'running',
-      statusIcon: 'rocket',
-    };
+  }
+
+  function startTrackerRetryPolling() {
+    if (trackerRetryIntervalId) return;
+    trackerRetryIntervalId = setInterval(() => {
+      refreshTrackerRetryStatuses();
+    }, 1000);
+    refreshTrackerRetryStatuses();
+  }
+
+  function stopTrackerRetryPolling() {
+    if (!trackerRetryIntervalId) return;
+    clearInterval(trackerRetryIntervalId);
+    trackerRetryIntervalId = null;
   }
 
   // =============================================================================
@@ -700,8 +854,16 @@
           updates.completionPercent = stats.torrent_completion;
         }
 
+        // Sync backend's effective ratio to frontend
+        if (stats.effective_stop_at_ratio != null) {
+          updates.effectiveStopAtRatio = stats.effective_stop_at_ratio;
+        }
+
         instanceActions.updateInstance(instanceId, updates);
 
+        if (await handlePostStopDelete(instanceId, stats)) {
+          return;
+        }
         if (shouldAutoStop(stats)) {
           await handleAutoStop(instanceId, stats);
         }
@@ -739,8 +901,16 @@
             updates.completionPercent = stats.torrent_completion;
           }
 
+          // Sync backend's effective ratio to frontend
+          if (stats.effective_stop_at_ratio != null) {
+            updates.effectiveStopAtRatio = stats.effective_stop_at_ratio;
+          }
+
           instanceActions.updateInstance(instanceId, updates);
 
+          if (await handlePostStopDelete(instanceId, stats)) {
+            return;
+          }
           if (shouldAutoStop(stats)) {
             await handleAutoStop(instanceId, stats);
           }
@@ -758,6 +928,13 @@
   // Track the current live stats interval (only one at a time — the active instance)
   let activeLiveStatsInstanceId = null;
   let activeLiveStatsIntervalId = null;
+
+  // Function to save the "remember my choice" application setting
+  function saveCloseBehaviorSetting(behavior) {
+    if (rememberCloseChoice) {
+      localStorage.setItem('rustatio-close-behavior', behavior);
+    }
+  }
 
   // Start live stats polling for a specific instance (only call for the active/visible instance)
   function startLiveStatsForInstance(instanceId) {
@@ -840,15 +1017,6 @@
       // Create initial stats object to show cumulative values immediately
       const calculatedLeft = torrentSize - calculatedDownloaded;
 
-      // Calculate initial progress values to avoid jumps
-      // Use uploaded/downloaded if downloaded > 0, otherwise use uploaded/torrent_size
-      const initialRatio =
-        displayDownloaded > 0
-          ? displayUploaded / displayDownloaded
-          : torrentSize > 0
-            ? displayUploaded / torrentSize
-            : 0;
-
       // Ratio progress is based on session ratio (starts at 0), not cumulative ratio
       // So initial ratio progress should always be 0 when starting a new session
 
@@ -857,7 +1025,7 @@
             // Cumulative (from previous sessions)
             uploaded: displayUploaded,
             downloaded: displayDownloaded,
-            ratio: initialRatio,
+            ratio: 0,
 
             // Torrent state
             left: calculatedLeft,
@@ -901,7 +1069,8 @@
         statusType: 'running',
       });
 
-      const fakerConfig = buildFakerConfig($activeInstance, {
+      const fakerConfig = buildFakerConfig($activeInstance, clientVersions, {
+        isServerMode,
         useCalculatedInitialDownloaded: true,
       });
 
@@ -922,7 +1091,12 @@
 
       // Get initial stats
       const initialStats = await api.getStats($activeInstance.id);
-      instanceActions.updateInstance($activeInstance.id, { stats: initialStats });
+      const initialUpdates = { stats: initialStats };
+      // Sync backend's effective ratio to frontend on start
+      if (initialStats.effective_stop_at_ratio != null) {
+        initialUpdates.effectiveStopAtRatio = initialStats.effective_stop_at_ratio;
+      }
+      instanceActions.updateInstance($activeInstance.id, initialUpdates);
     } catch (error) {
       instanceActions.updateInstance($activeInstance.id, {
         statusMessage: 'Failed to start: ' + error,
@@ -1016,9 +1190,7 @@
       await api.pauseFaker($activeInstance.id);
       instanceActions.updateInstance($activeInstance.id, {
         isPaused: true,
-        statusMessage: 'Paused',
-        statusType: 'idle',
-        statusIcon: 'pause',
+        ...getPausedStatus(),
       });
     } catch (error) {
       devLog('error', 'Pause error:', error);
@@ -1054,58 +1226,6 @@
     }
   }
 
-  function getCalculatedInitialDownloaded(instance) {
-    const torrentSize = instance?.torrent?.total_size || 0;
-    const completionPercent = parseFloat(instance?.completionPercent ?? 0);
-    return Math.floor((completionPercent / 100) * torrentSize);
-  }
-
-  // Build a FakerConfig object from instance UI state
-  function buildFakerConfig(instance, opts = {}) {
-    const completionPercent = parseFloat(instance.completionPercent ?? 0);
-    const initialDownloaded = opts.useCalculatedInitialDownloaded
-      ? getCalculatedInitialDownloaded(instance)
-      : parseInt(instance.initialDownloaded ?? 0) * 1024 * 1024;
-
-    return {
-      upload_rate: parseFloat(instance.uploadRate ?? 50),
-      download_rate: parseFloat(instance.downloadRate ?? 100),
-      port: parseInt(instance.port ?? 6881),
-      client_type: instance.selectedClient || 'qbittorrent',
-      client_version:
-        instance.selectedClientVersion ||
-        clientVersions[instance.selectedClient || 'qbittorrent']?.[0] ||
-        '',
-      initial_uploaded: parseInt(instance.initialUploaded ?? 0) * 1024 * 1024,
-      initial_downloaded: initialDownloaded,
-      completion_percent: completionPercent,
-      num_want: 50,
-      randomize_rates: instance.randomizeRates ?? true,
-      random_range_percent: parseFloat(instance.randomRangePercent ?? 20),
-      stop_at_ratio: instance.stopAtRatioEnabled ? parseFloat(instance.stopAtRatio ?? 2.0) : null,
-      stop_at_uploaded: instance.stopAtUploadedEnabled
-        ? parseFloat(instance.stopAtUploadedGB ?? 10) * 1024 * 1024 * 1024
-        : null,
-      stop_at_downloaded: instance.stopAtDownloadedEnabled
-        ? parseFloat(instance.stopAtDownloadedGB ?? 10) * 1024 * 1024 * 1024
-        : null,
-      stop_at_seed_time: instance.stopAtSeedTimeEnabled
-        ? parseFloat(instance.stopAtSeedTimeHours ?? 24) * 3600
-        : null,
-      idle_when_no_leechers: instance.idleWhenNoLeechers ?? false,
-      idle_when_no_seeders: instance.idleWhenNoSeeders ?? false,
-      progressive_rates: instance.progressiveRatesEnabled ?? false,
-      target_upload_rate: instance.progressiveRatesEnabled
-        ? parseFloat(instance.targetUploadRate ?? 100)
-        : null,
-      target_download_rate: instance.progressiveRatesEnabled
-        ? parseFloat(instance.targetDownloadRate ?? 200)
-        : null,
-      progressive_duration: parseFloat(instance.progressiveDurationHours ?? 1) * 3600,
-      scrape_interval: parseInt(instance.scrapeInterval ?? 60),
-    };
-  }
-
   // Start all instances with torrents loaded (bulk)
   async function startAllInstances() {
     const currentInstances = get(instances);
@@ -1116,7 +1236,7 @@
     // Build per-instance configs and sync to backend
     const configEntries = instancesToStart.map(instance => ({
       id: instance.id,
-      config: buildFakerConfig(instance),
+      config: buildFakerConfig(instance, clientVersions, { isServerMode }),
     }));
 
     try {
@@ -1194,9 +1314,7 @@
         await api.pauseFaker(instance.id);
         instanceActions.updateInstance(instance.id, {
           isPaused: true,
-          statusMessage: 'Paused',
-          statusType: 'idle',
-          statusIcon: 'pause',
+          ...getPausedStatus(),
         });
       })
     );
@@ -1254,9 +1372,7 @@
       // Restore the correct status message based on paused state or idling
       let statusMessage, statusType, statusIcon;
       if (isPausedBeforeUpdate) {
-        statusMessage = 'Paused';
-        statusType = 'idle';
-        statusIcon = 'pause';
+        ({ statusMessage, statusType, statusIcon } = getPausedStatus());
       } else {
         const statusFromStats = getStatusFromStats(stats);
         statusMessage = statusFromStats.statusMessage;
@@ -1284,18 +1400,14 @@
         if (instance && instance.isRunning) {
           let statusMessage, statusType, statusIcon;
           if (instance.isPaused) {
-            statusMessage = 'Paused';
-            statusType = 'idle';
-            statusIcon = 'pause';
+            ({ statusMessage, statusType, statusIcon } = getPausedStatus());
           } else if (instance.stats?.is_idling) {
             const statusFromStats = getStatusFromStats(instance.stats);
             statusMessage = statusFromStats.statusMessage;
             statusType = statusFromStats.statusType;
             statusIcon = statusFromStats.statusIcon;
           } else {
-            statusMessage = 'Actively faking ratio...';
-            statusType = 'running';
-            statusIcon = 'rocket';
+            ({ statusMessage, statusType, statusIcon } = getRunningStatus());
           }
           instanceActions.updateInstance(instanceId, {
             statusMessage,
@@ -1342,7 +1454,10 @@
     configSyncTimeout = setTimeout(async () => {
       try {
         // Build FakerConfig from instance state
-        const config = buildFakerConfig(instance, { useCalculatedInitialDownloaded: true });
+        const config = buildFakerConfig(instance, clientVersions, {
+          isServerMode,
+          useCalculatedInitialDownloaded: true,
+        });
 
         await api.updateInstanceConfig(instanceId, config);
         devLog('log', `Synced config for instance ${instanceId} to server`);
@@ -1354,6 +1469,7 @@
 
   async function handleCloseToTray() {
     closePromptVisible = false;
+    saveCloseBehaviorSetting('tray');
     try {
       await api.closeToTray();
     } catch (error) {
@@ -1363,6 +1479,7 @@
 
   async function handleQuitFromPrompt() {
     closePromptVisible = false;
+    saveCloseBehaviorSetting('quit');
     try {
       await api.quitApp();
     } catch (error) {
@@ -1372,6 +1489,7 @@
 
   async function handleCancelClosePrompt() {
     closePromptVisible = false;
+    rememberCloseChoice = false;
     try {
       await api.cancelClosePrompt();
     } catch (error) {
@@ -1398,6 +1516,10 @@
       onStopAll={stopAllInstances}
       onPauseAll={pauseAllInstances}
       onResumeAll={resumeAllInstances}
+      {networkStatus}
+      {networkStatusLoading}
+      {networkStatusError}
+      onRefreshNetworkStatus={refreshNetworkStatus}
     />
 
     <!-- Main Content -->
@@ -1412,7 +1534,7 @@
         <div class="relative theme-selector">
           <button
             onclick={toggleThemeDropdown}
-            class="bg-secondary text-secondary-foreground border-2 border-border rounded-lg p-2 flex items-center gap-2 cursor-pointer transition-all hover:bg-primary hover:border-primary hover:text-primary-foreground active:scale-[0.98] shadow-lg"
+            class="group bg-secondary text-secondary-foreground border-2 border-border rounded-lg p-2 flex items-center gap-2 cursor-pointer transition-all hover:bg-primary hover:border-primary hover:text-primary-foreground hover:[&_svg]:!text-current active:scale-[0.98] shadow-lg"
             title="Theme: {getThemeName(getTheme())}"
             aria-label="Toggle theme menu"
           >
@@ -1442,7 +1564,7 @@
                   <button
                     class="w-full flex items-center gap-3 px-3 py-2 border-none cursor-pointer rounded-lg transition-all {getTheme() ===
                     themeOption.id
-                      ? 'bg-primary text-primary-foreground shadow-sm'
+                      ? 'bg-primary text-primary-foreground shadow-sm [&_svg]:!text-current'
                       : 'bg-transparent text-card-foreground hover:bg-secondary/80'}"
                     onclick={() => selectTheme(themeOption.id)}
                   >
@@ -1465,26 +1587,20 @@
       </div>
 
       <!-- Header -->
-      <Header onToggleSidebar={() => (sidebarOpen = !sidebarOpen)} />
-
-      <!-- Full-width border separator -->
-      <div class="border-b-2 border-primary/20"></div>
-
-      <!-- Status Bar (standard mode only) -->
-      {#if $viewMode === 'standard'}
-        <StatusBar
-          statusMessage={$activeInstance?.statusMessage || 'Select a torrent file to begin'}
-          statusType={$activeInstance?.statusType || 'warning'}
-          statusIcon={$activeInstance?.statusIcon || null}
-          isRunning={$activeInstance?.isRunning || false}
-          isPaused={$activeInstance?.isPaused || false}
-          {startFaking}
-          {stopFaking}
-          {pauseFaking}
-          {resumeFaking}
-          {manualUpdate}
-        />
-      {/if}
+      <Header
+        onToggleSidebar={() => (sidebarOpen = !sidebarOpen)}
+        showStatus={$viewMode === 'standard'}
+        statusMessage={$activeInstance?.statusMessage || 'Select a torrent file to begin'}
+        statusType={$activeInstance?.statusType || 'warning'}
+        statusIcon={$activeInstance?.statusIcon || null}
+        isRunning={$activeInstance?.isRunning || false}
+        isPaused={$activeInstance?.isPaused || false}
+        {startFaking}
+        {stopFaking}
+        {pauseFaking}
+        {resumeFaking}
+        {manualUpdate}
+      />
 
       <!-- Scrollable Content Area -->
       {#if $viewMode === 'grid'}
@@ -1536,6 +1652,12 @@
                   selectedClient={$activeInstance.selectedClient}
                   selectedClientVersion={$activeInstance.selectedClientVersion}
                   port={$activeInstance.port}
+                  currentForwardedPort={getForwardedPort(networkStatus)}
+                  vpnPortSyncVisible={isServerMode}
+                  networkStatusConfigured={isServerMode ? isNetworkConfigured(networkStatus) : true}
+                  vpnPortSyncEnabled={isServerMode ? getVpnPortSyncEnabled(networkStatus) : false}
+                  {networkStatusError}
+                  vpnPortSync={$activeInstance.vpnPortSync}
                   uploadRate={$activeInstance.uploadRate}
                   downloadRate={$activeInstance.downloadRate}
                   completionPercent={$activeInstance.completionPercent}
@@ -1581,6 +1703,9 @@
                 <StopConditions
                   stopAtRatioEnabled={$activeInstance.stopAtRatioEnabled}
                   stopAtRatio={$activeInstance.stopAtRatio}
+                  randomizeRatio={$activeInstance.randomizeRatio}
+                  randomRatioRangePercent={$activeInstance.randomRatioRangePercent}
+                  effectiveStopAtRatio={$activeInstance.effectiveStopAtRatio}
                   stopAtUploadedEnabled={$activeInstance.stopAtUploadedEnabled}
                   stopAtUploadedGB={$activeInstance.stopAtUploadedGB}
                   stopAtDownloadedEnabled={$activeInstance.stopAtDownloadedEnabled}
@@ -1589,9 +1714,30 @@
                   stopAtSeedTimeHours={$activeInstance.stopAtSeedTimeHours}
                   idleWhenNoLeechers={$activeInstance.idleWhenNoLeechers}
                   idleWhenNoSeeders={$activeInstance.idleWhenNoSeeders}
+                  postStopAction={$activeInstance.postStopAction}
                   completionPercent={$activeInstance.completionPercent}
                   isRunning={$activeInstance.isRunning || false}
                   onUpdate={updates => {
+                    // Recompute effective ratio preview when ratio-related settings change
+                    // Only recompute on frontend if the instance is NOT running
+                    // (when running, the backend's effective ratio is authoritative)
+                    if (
+                      !($activeInstance.isRunning || false) &&
+                      ('stopAtRatio' in updates ||
+                        'randomizeRatio' in updates ||
+                        'randomRatioRangePercent' in updates ||
+                        'stopAtRatioEnabled' in updates)
+                    ) {
+                      const inst = $activeInstance;
+                      const merged = { ...inst, ...updates };
+                      updates.effectiveStopAtRatio = merged.stopAtRatioEnabled
+                        ? computeEffectiveRatio(
+                            merged.stopAtRatio,
+                            merged.randomizeRatio,
+                            merged.randomRatioRangePercent
+                          )
+                        : null;
+                    }
                     instanceActions.updateInstance($activeInstance.id, updates);
                     // Sync config to server (debounced) so it persists across page refreshes
                     syncConfigToServer($activeInstance.id);
@@ -1604,7 +1750,8 @@
                     completionPercent={$activeInstance.completionPercent ?? 100}
                     torrentSize={$activeInstance.torrent?.total_size ?? 0}
                     stopAtRatioEnabled={$activeInstance.stopAtRatioEnabled}
-                    stopAtRatio={$activeInstance.stopAtRatio}
+                    stopAtRatio={$activeInstance.effectiveStopAtRatio ??
+                      $activeInstance.stopAtRatio}
                     stopAtUploadedEnabled={$activeInstance.stopAtUploadedEnabled}
                     stopAtUploadedGB={$activeInstance.stopAtUploadedGB}
                     stopAtDownloadedEnabled={$activeInstance.stopAtDownloadedEnabled}
@@ -1654,6 +1801,39 @@
   </div>
 {/if}
 
+<BaseModal
+  open={errorDialogOpen}
+  onClose={() => {
+    errorDialogOpen = false;
+  }}
+  titleId="app-error-dialog-title"
+  maxWidthClass="max-w-md"
+  panelClass="animate-in fade-in zoom-in-95 duration-200 overflow-hidden"
+>
+  <div class="p-6 border-b border-border/70">
+    <h2 id="app-error-dialog-title" class="text-lg font-semibold text-foreground">
+      {errorDialogTitle}
+    </h2>
+  </div>
+  <div class="p-6 space-y-6">
+    <p class="text-sm leading-6 text-muted-foreground whitespace-pre-line">
+      {errorDialogMessage}
+    </p>
+    <div class="flex justify-end">
+      <Button
+        onclick={() => {
+          errorDialogOpen = false;
+        }}
+        size="sm"
+      >
+        {#snippet children()}
+          OK
+        {/snippet}
+      </Button>
+    </div>
+  </div>
+</BaseModal>
+
 <ConfirmDialog
   bind:open={closePromptVisible}
   title="Close Rustatio?"
@@ -1663,6 +1843,8 @@
   confirmLabel="Quit"
   kind="danger"
   titleId="app-close-prompt-title"
+  showRememberChoice={true}
+  bind:rememberChoiceChecked={rememberCloseChoice}
   onCancel={handleCancelClosePrompt}
   onSecondary={handleCloseToTray}
   onConfirm={handleQuitFromPrompt}

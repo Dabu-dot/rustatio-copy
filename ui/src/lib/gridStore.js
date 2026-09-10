@@ -2,6 +2,15 @@ import { writable, derived, get } from 'svelte/store';
 import { api, getRunMode } from '$lib/api';
 import { normalizeViewMode } from '$lib/viewMode.js';
 import { instanceActions } from '$lib/instanceStore.js';
+import {
+  applyAllGridFilters,
+  applyBaseGridFilters,
+  applySearchFilter,
+  applyStateFilter,
+  buildStateFilterEntries,
+  buildTagFilterEntries,
+  buildTrackerFilterEntries,
+} from '$lib/gridFilters.js';
 
 const VIEW_MODE_KEY = 'rustatio-view-mode';
 
@@ -33,8 +42,35 @@ export const selectedIds = writable(new Set());
 export const gridFilters = writable({
   search: '',
   stateFilter: 'all',
-  tagFilter: '',
+  tagFilter: [],
+  trackerFilter: [],
+  tagSearch: '',
+  trackerSearch: '',
 });
+
+export const stateFilterEntries = derived(
+  [gridInstances, gridFilters],
+  ([$instances, $filters]) => {
+    const scoped = applyBaseGridFilters(applySearchFilter($instances, $filters), {
+      ...$filters,
+      stateFilter: 'all',
+    });
+    return buildStateFilterEntries(scoped);
+  }
+);
+
+export const tagFilterEntries = derived([gridInstances, gridFilters], ([$instances, $filters]) => {
+  const scoped = applyStateFilter(applySearchFilter($instances, $filters), $filters);
+  return buildTagFilterEntries(scoped, $filters);
+});
+
+export const trackerFilterEntries = derived(
+  [gridInstances, gridFilters],
+  ([$instances, $filters]) => {
+    const scoped = applyBaseGridFilters($instances, { ...$filters, trackerFilter: [] });
+    return buildTrackerFilterEntries(scoped, $filters);
+  }
+);
 
 // Sorting state
 export const gridSort = writable({
@@ -46,28 +82,7 @@ export const gridSort = writable({
 export const filteredGridInstances = derived(
   [gridInstances, gridFilters, gridSort],
   ([$instances, $filters, $sort]) => {
-    let result = $instances;
-
-    // Search filter
-    if ($filters.search) {
-      const search = $filters.search.toLowerCase();
-      result = result.filter(
-        inst =>
-          inst.name.toLowerCase().includes(search) ||
-          inst.infoHash?.toLowerCase().includes(search) ||
-          inst.tags?.some(t => t.toLowerCase().includes(search))
-      );
-    }
-
-    // State filter
-    if ($filters.stateFilter !== 'all') {
-      result = result.filter(inst => inst.state.toLowerCase() === $filters.stateFilter);
-    }
-
-    // Tag filter
-    if ($filters.tagFilter) {
-      result = result.filter(inst => inst.tags?.includes($filters.tagFilter));
-    }
+    let result = applyAllGridFilters($instances, $filters);
 
     // Sort
     result = [...result].sort((a, b) => {
@@ -88,19 +103,6 @@ export const filteredGridInstances = derived(
     return result;
   }
 );
-
-// All unique tags across all instances
-export const allTags = derived(gridInstances, $instances => {
-  const tagSet = new Set();
-  for (const inst of $instances) {
-    if (inst.tags) {
-      for (const tag of inst.tags) {
-        tagSet.add(tag);
-      }
-    }
-  }
-  return [...tagSet].sort();
-});
 
 // Polling interval reference
 let pollInterval = null;
