@@ -120,6 +120,36 @@ function createDefaultInstance(id, defaults = {}) {
     progressiveDurationHours:
       defaults.progressiveDurationHours !== undefined ? defaults.progressiveDurationHours : 1,
 
+    // Scrape Start Conditions
+    startWhenLeechersAboveEnabled:
+      defaults.startWhenLeechersAboveEnabled !== undefined
+        ? defaults.startWhenLeechersAboveEnabled
+        : false,
+    startWhenLeechersAbove:
+      defaults.startWhenLeechersAbove !== undefined ? defaults.startWhenLeechersAbove : 0,
+    startWhenSeedersAboveEnabled:
+      defaults.startWhenSeedersAboveEnabled !== undefined
+        ? defaults.startWhenSeedersAboveEnabled
+        : false,
+    startWhenSeedersAbove:
+      defaults.startWhenSeedersAbove !== undefined ? defaults.startWhenSeedersAbove : 0,
+
+    // Cyclic Scheduling
+    cyclicEnabled: defaults.cyclicEnabled !== undefined ? defaults.cyclicEnabled : false,
+    minActiveDurationHours:
+      defaults.minActiveDurationHours !== undefined ? defaults.minActiveDurationHours : 4,
+    maxActiveDurationHours:
+      defaults.maxActiveDurationHours !== undefined ? defaults.maxActiveDurationHours : 4,
+    minInactiveDurationHours:
+      defaults.minInactiveDurationHours !== undefined ? defaults.minInactiveDurationHours : 2,
+    maxInactiveDurationHours:
+      defaults.maxInactiveDurationHours !== undefined ? defaults.maxInactiveDurationHours : 2,
+    resetSessionCountersOnCycle:
+      defaults.resetSessionCountersOnCycle !== undefined
+        ? defaults.resetSessionCountersOnCycle
+        : true,
+    inactiveMode: defaults.inactiveMode || 'idle',
+
     // Status
     statusMessage: 'Select a torrent file to begin',
     statusType: 'warning',
@@ -251,6 +281,17 @@ function loadSessionFromStorage(config = null) {
         targetUploadRate: inst.target_upload_rate,
         targetDownloadRate: inst.target_download_rate,
         progressiveDurationHours: inst.progressive_duration_hours,
+        startWhenLeechersAboveEnabled: inst.start_when_leechers_above_enabled || false,
+        startWhenLeechersAbove: inst.start_when_leechers_above || 0,
+        startWhenSeedersAboveEnabled: inst.start_when_seeders_above_enabled || false,
+        startWhenSeedersAbove: inst.start_when_seeders_above || 0,
+        cyclicEnabled: inst.cyclic_enabled || false,
+        minActiveDurationHours: inst.min_active_duration_hours || 4,
+        maxActiveDurationHours: inst.max_active_duration_hours || 4,
+        minInactiveDurationHours: inst.min_inactive_duration_hours || 2,
+        maxInactiveDurationHours: inst.max_inactive_duration_hours || 2,
+        resetSessionCountersOnCycle: inst.reset_session_counters_on_cycle ?? true,
+        inactiveMode: inst.inactive_mode || 'idle',
       })),
       activeInstanceId: isTauri
         ? sessionData.active_instance_real_id
@@ -328,6 +369,19 @@ function buildInstanceDefaultsFromServer(serverInst) {
     targetDownloadRate: config.target_download_rate || 200,
     progressiveDurationHours: (config.progressive_duration || 3600) / 3600,
     scrapeInterval: config.scrape_interval || 60,
+    startWhenLeechersAboveEnabled:
+      config.start_when_leechers_above !== null && config.start_when_leechers_above !== undefined,
+    startWhenLeechersAbove: config.start_when_leechers_above || 0,
+    startWhenSeedersAboveEnabled:
+      config.start_when_seeders_above !== null && config.start_when_seeders_above !== undefined,
+    startWhenSeedersAbove: config.start_when_seeders_above || 0,
+    cyclicEnabled: config.cyclic_enabled || false,
+    minActiveDurationHours: (config.min_active_duration || 14400) / 3600,
+    maxActiveDurationHours: (config.max_active_duration || 14400) / 3600,
+    minInactiveDurationHours: (config.min_inactive_duration || 7200) / 3600,
+    maxInactiveDurationHours: (config.max_inactive_duration || 7200) / 3600,
+    resetSessionCountersOnCycle: config.reset_session_counters_on_cycle ?? true,
+    inactiveMode: config.inactive_mode || 'idle',
   };
 }
 

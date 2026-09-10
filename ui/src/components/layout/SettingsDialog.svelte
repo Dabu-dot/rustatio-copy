@@ -73,12 +73,68 @@
   let defaultPresetId = $state(getDefaultPresetId());
   let defaultPresetName = $state(getDefaultPreset()?.name || 'Rustatio defaults');
 
+  // Max active settings state
+  let maxActiveSettings = $state({
+    global_max_active_enabled: false,
+    global_min_active: 3,
+    global_max_active: 5,
+    tracker_max_active: {},
+  });
+  let newTrackerHost = $state('');
+  let newTrackerMin = $state(2);
+  let newTrackerMax = $state(4);
+
+  async function loadMaxActiveSettings() {
+    try {
+      const res = await api.getMaxActiveSettings();
+      if (res) {
+        maxActiveSettings = {
+          global_max_active_enabled: res.global_max_active_enabled ?? false,
+          global_min_active: res.global_min_active ?? 3,
+          global_max_active: res.global_max_active ?? 5,
+          tracker_max_active: res.tracker_max_active ?? {},
+          last_randomized_at: res.last_randomized_at,
+          current_effective_global_limit: res.current_effective_global_limit,
+          current_effective_tracker_limits: res.current_effective_tracker_limits ?? {},
+        };
+      }
+    } catch (e) {
+      console.warn('Failed to load max active settings:', e);
+    }
+  }
+
+  async function saveMaxActiveSettings() {
+    try {
+      await api.setMaxActiveSettings(maxActiveSettings);
+    } catch (e) {
+      console.error('Failed to save max active settings:', e);
+    }
+  }
+
+  function addTrackerMaxActiveRule() {
+    const host = newTrackerHost.trim().toLowerCase();
+    if (!host) return;
+    maxActiveSettings.tracker_max_active[host] = {
+      enabled: true,
+      min_active: Number(newTrackerMin) || 1,
+      max_active: Number(newTrackerMax) || 1,
+    };
+    newTrackerHost = '';
+    saveMaxActiveSettings();
+  }
+
+  function removeTrackerMaxActiveRule(host) {
+    delete maxActiveSettings.tracker_max_active[host];
+    saveMaxActiveSettings();
+  }
+
   async function loadPresetState() {
     try {
       customPresets = normalizePresets((await api.listCustomPresets()) || []);
       const preset = await refreshDefaultPreset();
       defaultPresetId = preset?.id || null;
       defaultPresetName = preset?.name || 'Rustatio defaults';
+      await loadMaxActiveSettings();
     } catch (e) {
       console.warn('Failed to load preset state:', e);
     }
@@ -558,6 +614,133 @@
               </div>
             </div>
           {/if}
+
+          <!-- Max Active Instances & Queue Limits Section -->
+          <div class="border border-border rounded-lg p-4">
+            <h3 class="font-semibold text-foreground mb-2">Max Active Instances & Queue Limits</h3>
+            <p class="text-sm text-muted-foreground mb-4">
+              Control the maximum number of torrents that can be simultaneously active (Running).
+              Queued torrents start automatically when an active slot opens up.
+            </p>
+
+            <!-- Global Limit -->
+            <div class="mb-4 p-3 bg-muted/30 rounded-lg border border-border space-y-3">
+              <div class="flex items-center justify-between">
+                <label for="global-max-active" class="text-sm font-medium cursor-pointer">
+                  Global Max Active Limit
+                </label>
+                <input
+                  id="global-max-active"
+                  type="checkbox"
+                  bind:checked={maxActiveSettings.global_max_active_enabled}
+                  onchange={saveMaxActiveSettings}
+                  class="rounded border-border accent-primary cursor-pointer"
+                />
+              </div>
+
+              {#if maxActiveSettings.global_max_active_enabled}
+                <div class="flex items-center gap-3 text-xs">
+                  <span class="text-muted-foreground">Limit Range:</span>
+                  <input
+                    type="number"
+                    bind:value={maxActiveSettings.global_min_active}
+                    min="1"
+                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium"
+                    onchange={saveMaxActiveSettings}
+                  />
+                  <span>to</span>
+                  <input
+                    type="number"
+                    bind:value={maxActiveSettings.global_max_active}
+                    min="1"
+                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium"
+                    onchange={saveMaxActiveSettings}
+                  />
+                  <span class="text-muted-foreground">active torrents</span>
+                </div>
+                {#if maxActiveSettings.current_effective_global_limit != null}
+                  <p class="text-xs text-primary font-medium">
+                    Current effective limit: {maxActiveSettings.current_effective_global_limit} active
+                    torrents
+                  </p>
+                {/if}
+              {/if}
+            </div>
+
+            <!-- Per-Tracker Limits -->
+            <div class="space-y-3">
+              <h4 class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Per-Tracker Override Limits
+              </h4>
+
+              {#each Object.entries(maxActiveSettings.tracker_max_active) as [host, rule] (host)}
+                <div
+                  class="flex items-center justify-between p-2.5 bg-muted/40 rounded-lg border border-border text-xs"
+                >
+                  <div class="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      bind:checked={rule.enabled}
+                      onchange={saveMaxActiveSettings}
+                      class="rounded border-border accent-primary cursor-pointer"
+                    />
+                    <span class="font-mono font-medium">{host}</span>
+                  </div>
+
+                  <div class="flex items-center gap-2">
+                    <input
+                      type="number"
+                      bind:value={rule.min_active}
+                      min="1"
+                      class="w-14 h-7 px-1 border border-border rounded bg-background text-center"
+                      onchange={saveMaxActiveSettings}
+                    />
+                    <span>-</span>
+                    <input
+                      type="number"
+                      bind:value={rule.max_active}
+                      min="1"
+                      class="w-14 h-7 px-1 border border-border rounded bg-background text-center"
+                      onchange={saveMaxActiveSettings}
+                    />
+                    <button
+                      onclick={() => removeTrackerMaxActiveRule(host)}
+                      class="p-1 rounded text-muted-foreground hover:text-stat-leecher hover:bg-stat-leecher/10 transition-colors ml-2"
+                      title="Remove rule"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              {/each}
+
+              <!-- Add tracker rule -->
+              <div class="flex items-center gap-2 pt-2 text-xs">
+                <input
+                  type="text"
+                  bind:value={newTrackerHost}
+                  placeholder="e.g. tracker.example.com"
+                  class="flex-1 h-8 px-2 border border-border rounded bg-background font-mono"
+                />
+                <input
+                  type="number"
+                  bind:value={newTrackerMin}
+                  min="1"
+                  placeholder="min"
+                  class="w-14 h-8 px-1 border border-border rounded bg-background text-center"
+                />
+                <span>-</span>
+                <input
+                  type="number"
+                  bind:value={newTrackerMax}
+                  min="1"
+                  placeholder="max"
+                  class="w-14 h-8 px-1 border border-border rounded bg-background text-center"
+                />
+                <Button size="sm" onclick={addTrackerMaxActiveRule}>Add Rule</Button>
+              </div>
+            </div>
+          </div>
 
           <!-- Theme Section -->
           <div class="border border-border rounded-lg p-4">

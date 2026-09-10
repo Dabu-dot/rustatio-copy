@@ -3887,6 +3887,7 @@ dependencies = [
  "hex",
  "mime_guess",
  "nanoid",
+ "rand 0.9.5",
  "reqwest 0.12.28",
  "rust-embed",
  "rustatio-core",

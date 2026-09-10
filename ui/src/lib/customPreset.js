@@ -75,6 +75,17 @@ export function buildCustomPreset(instance, { name, description = '', id, now = 
       idleWhenNoLeechers: instance.idleWhenNoLeechers,
       idleWhenNoSeeders: instance.idleWhenNoSeeders,
       postStopAction: instance.postStopAction,
+      startWhenLeechersAboveEnabled: instance.startWhenLeechersAboveEnabled,
+      startWhenLeechersAbove: instance.startWhenLeechersAbove,
+      startWhenSeedersAboveEnabled: instance.startWhenSeedersAboveEnabled,
+      startWhenSeedersAbove: instance.startWhenSeedersAbove,
+      cyclicEnabled: instance.cyclicEnabled,
+      minActiveDurationHours: instance.minActiveDurationHours,
+      maxActiveDurationHours: instance.maxActiveDurationHours,
+      minInactiveDurationHours: instance.minInactiveDurationHours,
+      maxInactiveDurationHours: instance.maxInactiveDurationHours,
+      resetSessionCountersOnCycle: instance.resetSessionCountersOnCycle,
+      inactiveMode: instance.inactiveMode,
     },
   };
 }

@@ -1715,6 +1715,17 @@
                   idleWhenNoLeechers={$activeInstance.idleWhenNoLeechers}
                   idleWhenNoSeeders={$activeInstance.idleWhenNoSeeders}
                   postStopAction={$activeInstance.postStopAction}
+                  startWhenLeechersAboveEnabled={$activeInstance.startWhenLeechersAboveEnabled}
+                  startWhenLeechersAbove={$activeInstance.startWhenLeechersAbove}
+                  startWhenSeedersAboveEnabled={$activeInstance.startWhenSeedersAboveEnabled}
+                  startWhenSeedersAbove={$activeInstance.startWhenSeedersAbove}
+                  cyclicEnabled={$activeInstance.cyclicEnabled}
+                  minActiveDurationHours={$activeInstance.minActiveDurationHours}
+                  maxActiveDurationHours={$activeInstance.maxActiveDurationHours}
+                  minInactiveDurationHours={$activeInstance.minInactiveDurationHours}
+                  maxInactiveDurationHours={$activeInstance.maxInactiveDurationHours}
+                  resetSessionCountersOnCycle={$activeInstance.resetSessionCountersOnCycle}
+                  inactiveMode={$activeInstance.inactiveMode}
                   completionPercent={$activeInstance.completionPercent}
                   isRunning={$activeInstance.isRunning || false}
                   onUpdate={updates => {

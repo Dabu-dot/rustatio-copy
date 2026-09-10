@@ -168,7 +168,8 @@ async function detectServerMode() {
 // Only import WASM if not in Tauri
 if (!isTauri) {
   try {
-    const wasmModule = await import('$lib/wasm/rustatio_wasm.js');
+    const wasmPath = '$lib/wasm/rustatio_wasm.js';
+    const wasmModule = await import(/* @vite-ignore */ wasmPath);
     wasm = wasmModule;
   } catch {
     // WASM not available, will use server mode
@@ -582,6 +583,15 @@ const serverApi = {
   clearDefaultConfig: async () => {
     await serverFetch('/config/default', { method: 'DELETE' });
   },
+  getMaxActiveSettings: async () => {
+    return serverFetch('/config/max-active', { method: 'GET' });
+  },
+  setMaxActiveSettings: async settings => {
+    await serverFetch('/config/max-active', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    });
+  },
   getDefaultPreset: async () => {
     return serverFetch('/config/default-preset', { method: 'GET' });
   },
@@ -987,6 +997,14 @@ const tauriApi = {
     const { invoke } = await import('@tauri-apps/api/core');
     return invoke('clear_default_config');
   },
+  getMaxActiveSettings: async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke('get_max_active_settings');
+  },
+  setMaxActiveSettings: async settings => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke('set_max_active_settings', { settings });
+  },
   getDefaultPreset: getLocalDefaultPreset,
   setDefaultPreset: setLocalDefaultPreset,
   clearDefaultPreset: clearLocalDefaultPreset,
@@ -1179,6 +1197,12 @@ const wasmApi = {
   },
   clearDefaultConfig: async () => {
     // No-op for WASM - localStorage is managed by defaultPreset.js
+  },
+  getMaxActiveSettings: async () => {
+    return readJsonStorage('rustatio-max-active', null);
+  },
+  setMaxActiveSettings: async settings => {
+    writeJsonStorage('rustatio-max-active', settings);
   },
   getDefaultPreset: getLocalDefaultPreset,
   setDefaultPreset: setLocalDefaultPreset,

@@ -13,7 +13,7 @@ use crate::api::{
     common::{ApiError, ApiSuccess, EmptyData},
     ServerState,
 };
-use crate::services::persistence::DefaultPreset;
+use crate::services::persistence::{DefaultPreset, MaxActiveSettings};
 
 #[utoipa::path(
     get,
@@ -137,6 +137,47 @@ pub async fn clear_default_preset(State(state): State<ServerState>) -> Response 
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/config/max-active",
+    tag = "config",
+    summary = "Get max active instance settings",
+    description = "Returns global and per-tracker max active instance limits and queue settings.",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Max active settings", body = ApiSuccess<Object>),
+        (status = 401, description = "Unauthorized", body = ApiError)
+    )
+)]
+pub async fn get_max_active_settings(State(state): State<ServerState>) -> Response {
+    let settings = state.app.get_max_active_settings().await.unwrap_or_default();
+    ApiSuccess::response(settings)
+}
+
+#[utoipa::path(
+    put,
+    path = "/config/max-active",
+    tag = "config",
+    summary = "Set max active instance settings",
+    description = "Sets global and per-tracker max active instance limits.",
+    security(("bearer_auth" = [])),
+    request_body(content = Object, description = "Max active settings"),
+    responses(
+        (status = 200, description = "Max active settings saved", body = ApiSuccess<EmptyData>),
+        (status = 401, description = "Unauthorized", body = ApiError),
+        (status = 500, description = "Failed to save max active settings", body = ApiError)
+    )
+)]
+pub async fn set_max_active_settings(
+    State(state): State<ServerState>,
+    Json(settings): Json<MaxActiveSettings>,
+) -> Response {
+    match state.app.set_max_active_settings(settings).await {
+        Ok(()) => ApiSuccess::response(EmptyData {}),
+        Err(e) => ApiError::response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
 pub fn router() -> Router<ServerState> {
     Router::new()
         .route("/config/default", get(get_default_config))
@@ -145,4 +186,6 @@ pub fn router() -> Router<ServerState> {
         .route("/config/default-preset", get(get_default_preset))
         .route("/config/default-preset", put(set_default_preset))
         .route("/config/default-preset", delete(clear_default_preset))
+        .route("/config/max-active", get(get_max_active_settings))
+        .route("/config/max-active", put(set_max_active_settings))
 }
