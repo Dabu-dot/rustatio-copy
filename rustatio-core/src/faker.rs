@@ -852,6 +852,21 @@ impl RatioFaker {
         self.start_time = Instant::now();
         self.last_update = Instant::now();
 
+        self.stats.is_cyclic_inactive = false;
+        if self.config.cyclic_enabled {
+            let mut rng = rand::rng();
+            let active_dur = if self.config.min_active_duration < self.config.max_active_duration {
+                rng.random_range(self.config.min_active_duration..=self.config.max_active_duration)
+            } else {
+                self.config.min_active_duration
+            };
+            let now_ms = Self::current_timestamp_millis();
+            self.cyclic_phase_start_ms = now_ms;
+            self.cyclic_phase_duration_secs = active_dur;
+            self.stats.cyclic_next_switch_ms =
+                Some(now_ms.saturating_add(active_dur.saturating_mul(1000)));
+        }
+
         let request = self.build_announce_request(TrackerEvent::Started);
 
         Some(AnnouncePlan {
@@ -1622,6 +1637,22 @@ impl RatioFaker {
         if self.stats.next_announce.is_none() {
             self.stats.next_announce = Some(now);
         }
+
+        self.stats.is_cyclic_inactive = false;
+        if self.config.cyclic_enabled {
+            let mut rng = rand::rng();
+            let active_dur = if self.config.min_active_duration < self.config.max_active_duration {
+                rng.random_range(self.config.min_active_duration..=self.config.max_active_duration)
+            } else {
+                self.config.min_active_duration
+            };
+            let now_ms = Self::current_timestamp_millis();
+            self.cyclic_phase_start_ms = now_ms;
+            self.cyclic_phase_duration_secs = active_dur;
+            self.stats.cyclic_next_switch_ms =
+                Some(now_ms.saturating_add(active_dur.saturating_mul(1000)));
+        }
+
         Ok(())
     }
 
@@ -2967,6 +2998,45 @@ mod tests {
 
         assert!(!faker.stats.is_cyclic_inactive);
         assert_eq!(faker.stats.session_uploaded, 0); // Reset on active transition
+    }
+
+    #[test]
+    fn test_manual_resume_resets_cyclic_inactive_state() {
+        let torrent = Arc::new(TorrentInfo {
+            info_hash: [27u8; 20],
+            announce: "https://tracker.test/announce".to_string(),
+            announce_list: None,
+            name: "sample".to_string(),
+            total_size: 1024,
+            piece_length: 256,
+            num_pieces: 4,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            is_single_file: true,
+            file_count: 1,
+            files: Vec::new(),
+        });
+
+        let faker = RatioFaker::new(
+            torrent,
+            FakerConfig {
+                cyclic_enabled: true,
+                min_active_duration: 10,
+                max_active_duration: 10,
+                ..FakerConfig::default()
+            },
+            None,
+        );
+        assert!(faker.is_ok());
+        let mut faker = faker.unwrap();
+
+        faker.stats.is_cyclic_inactive = true;
+        let res = faker.resume();
+        assert!(res.is_ok());
+
+        assert!(!faker.stats.is_cyclic_inactive);
+        assert!(faker.stats.cyclic_next_switch_ms.is_some());
     }
 
     #[test]
