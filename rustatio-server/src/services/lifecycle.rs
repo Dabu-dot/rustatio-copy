@@ -44,7 +44,8 @@ impl InstanceLifecycle for AppState {
                 rustatio_core::FakerState::Running | rustatio_core::FakerState::Starting
             );
             let restore = is_already_active && stats.elapsed_time.as_secs() > 0;
-            let tracker_host = rustatio_core::primary_tracker_host(&instance.summary.announce).unwrap_or_default();
+            let tracker_host =
+                rustatio_core::primary_tracker_host(&instance.summary.announce).unwrap_or_default();
             (Arc::clone(&instance.faker), restore, is_already_active, tracker_host)
         };
 
@@ -56,9 +57,13 @@ impl InstanceLifecycle for AppState {
 
                 for inst in instances.values() {
                     let st = inst.faker.stats_snapshot().state;
-                    if matches!(st, rustatio_core::FakerState::Running | rustatio_core::FakerState::Starting) {
+                    if matches!(
+                        st,
+                        rustatio_core::FakerState::Running | rustatio_core::FakerState::Starting
+                    ) {
                         current_total_running += 1;
-                        let host = rustatio_core::primary_tracker_host(&inst.summary.announce).unwrap_or_default();
+                        let host = rustatio_core::primary_tracker_host(&inst.summary.announce)
+                            .unwrap_or_default();
                         if host == tracker_host {
                             current_tracker_running += 1;
                         }
@@ -66,9 +71,8 @@ impl InstanceLifecycle for AppState {
                 }
 
                 if settings.global_max_active_enabled {
-                    let global_limit = settings
-                        .current_effective_global_limit
-                        .or(settings.global_max_active);
+                    let global_limit =
+                        settings.current_effective_global_limit.or(settings.global_max_active);
                     if let Some(limit) = global_limit {
                         if current_total_running >= limit {
                             return Err(format!(

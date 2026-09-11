@@ -1138,7 +1138,9 @@ impl RatioFaker {
             } else {
                 (false, None)
             }
-        } else if self.stats.stop_condition_met && self.config.post_stop_action == PostStopAction::Idle {
+        } else if self.stats.stop_condition_met
+            && self.config.post_stop_action == PostStopAction::Idle
+        {
             // Preserve idling state if stop condition was met with post_stop_action=Idle
             upload_rate = 0.0;
             download_rate = 0.0;
@@ -1347,7 +1349,9 @@ impl RatioFaker {
                 );
 
                 if self.check_scrape_start_conditions() {
-                    if self.stats.stop_condition_met || matches!(self.stats.state, FakerState::Stopped) {
+                    if self.stats.stop_condition_met
+                        || matches!(self.stats.state, FakerState::Stopped)
+                    {
                         log_info!(
                             "Scrape start condition met (seeders={}, leechers={}), starting/resuming torrent: {}",
                             self.stats.seeders,
@@ -1827,12 +1831,14 @@ impl RatioFaker {
             }
         } else {
             // Transition from active to inactive
-            let inactive_dur = if self.config.min_inactive_duration < self.config.max_inactive_duration
-            {
-                rng.random_range(self.config.min_inactive_duration..=self.config.max_inactive_duration)
-            } else {
-                self.config.min_inactive_duration
-            };
+            let inactive_dur =
+                if self.config.min_inactive_duration < self.config.max_inactive_duration {
+                    rng.random_range(
+                        self.config.min_inactive_duration..=self.config.max_inactive_duration,
+                    )
+                } else {
+                    self.config.min_inactive_duration
+                };
 
             log_info!(
                 "Cyclic interval: transitioning to inactive phase ({:?}) for {}s (torrent: {})",
@@ -2920,10 +2926,7 @@ mod tests {
 
         let faker = RatioFaker::new(
             torrent,
-            FakerConfig {
-                start_when_leechers_above: Some(5),
-                ..FakerConfig::default()
-            },
+            FakerConfig { start_when_leechers_above: Some(5), ..FakerConfig::default() },
             None,
         );
         assert!(faker.is_ok());

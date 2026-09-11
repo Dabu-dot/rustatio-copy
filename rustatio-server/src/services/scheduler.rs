@@ -158,6 +158,51 @@ async fn update_instances(
     dirty
 }
 
+fn roll_limits(settings: &mut rustatio_core::MaxActiveSettings, now_secs: u64) {
+    let mut rng = rand::rng();
+
+    if settings.global_max_active_enabled {
+        if let (Some(min_val), Some(max_val)) =
+            (settings.global_min_active, settings.global_max_active)
+        {
+            let limit =
+                if min_val < max_val { rng.random_range(min_val..=max_val) } else { min_val };
+            settings.current_effective_global_limit = Some(limit);
+        }
+    } else {
+        settings.current_effective_global_limit = None;
+    }
+
+    settings.current_effective_tracker_limits.clear();
+    for (host, tr_setting) in &settings.tracker_max_active {
+        if tr_setting.enabled {
+            let limit = if tr_setting.min_active < tr_setting.max_active {
+                rng.random_range(tr_setting.min_active..=tr_setting.max_active)
+            } else {
+                tr_setting.min_active
+            };
+            settings.current_effective_tracker_limits.insert(host.clone(), limit);
+        }
+    }
+
+    settings.last_randomized_at = Some(now_secs);
+}
+
+pub async fn roll_and_apply_max_active_limits(
+    state: &AppState,
+) -> Result<rustatio_core::MaxActiveSettings, String> {
+    let mut settings = state.get_max_active_settings().await.unwrap_or_default();
+    let now_secs = now_timestamp();
+    roll_limits(&mut settings, now_secs);
+
+    state.set_max_active_settings(settings.clone()).await?;
+
+    let instances_map = state.instances.clone();
+    manage_max_active_and_queue(state, &instances_map).await;
+
+    Ok(state.get_max_active_settings().await.unwrap_or(settings))
+}
+
 async fn manage_max_active_and_queue(
     state: &AppState,
     instances: &Arc<RwLock<HashMap<String, FakerInstance>>>,
@@ -175,34 +220,7 @@ async fn manage_max_active_and_queue(
     });
 
     if needs_randomization {
-        let mut rng = rand::rng();
-
-        if settings.global_max_active_enabled {
-            if let (Some(min_val), Some(max_val)) = (settings.global_min_active, settings.global_max_active) {
-                let limit = if min_val < max_val {
-                    rng.random_range(min_val..=max_val)
-                } else {
-                    min_val
-                };
-                settings.current_effective_global_limit = Some(limit);
-            }
-        } else {
-            settings.current_effective_global_limit = None;
-        }
-
-        settings.current_effective_tracker_limits.clear();
-        for (host, tr_setting) in &settings.tracker_max_active {
-            if tr_setting.enabled {
-                let limit = if tr_setting.min_active < tr_setting.max_active {
-                    rng.random_range(tr_setting.min_active..=tr_setting.max_active)
-                } else {
-                    tr_setting.min_active
-                };
-                settings.current_effective_tracker_limits.insert(host.clone(), limit);
-            }
-        }
-
-        settings.last_randomized_at = Some(now_secs);
+        roll_limits(&mut settings, now_secs);
         settings_modified = true;
     }
 
@@ -343,8 +361,11 @@ async fn manage_max_active_and_queue(
     let eligible_candidates: Vec<&InstanceStateInfo> = candidates_to_start
         .into_iter()
         .filter(|item| {
-            if let Some(&tr_limit) = settings.current_effective_tracker_limits.get(&item.tracker_host) {
-                let current_tr_running = running_by_tracker.get(&item.tracker_host).copied().unwrap_or(0);
+            if let Some(&tr_limit) =
+                settings.current_effective_tracker_limits.get(&item.tracker_host)
+            {
+                let current_tr_running =
+                    running_by_tracker.get(&item.tracker_host).copied().unwrap_or(0);
                 if current_tr_running >= tr_limit {
                     return false;
                 }
@@ -364,10 +385,7 @@ async fn manage_max_active_and_queue(
         eligible_candidates[idx].id.clone()
     };
 
-    tracing::info!(
-        "Queue scheduler: Starting next queued instance {}",
-        selected_id
-    );
+    tracing::info!("Queue scheduler: Starting next queued instance {}", selected_id);
 
     if let Err(e) = state.start_instance(&selected_id).await {
         tracing::warn!("Queue scheduler: Failed to start instance {}: {}", selected_id, e);
@@ -408,14 +426,8 @@ mod tests {
         let state = AppState::new(&temp.path().to_string_lossy());
 
         // Create 2 instances
-        state
-            .create_instance("inst-1", sample_torrent(1), FakerConfig::default())
-            .await
-            .unwrap();
-        state
-            .create_instance("inst-2", sample_torrent(2), FakerConfig::default())
-            .await
-            .unwrap();
+        state.create_instance("inst-1", sample_torrent(1), FakerConfig::default()).await.unwrap();
+        state.create_instance("inst-2", sample_torrent(2), FakerConfig::default()).await.unwrap();
 
         // Enable global max active = 1
         let mut settings = MaxActiveSettings::default();
@@ -431,10 +443,8 @@ mod tests {
         let changed = manage_max_active_and_queue(&state, &instances_map).await;
         assert!(changed);
 
-        let effective_limit = state
-            .get_max_active_settings()
-            .await
-            .and_then(|s| s.current_effective_global_limit);
+        let effective_limit =
+            state.get_max_active_settings().await.and_then(|s| s.current_effective_global_limit);
         assert_eq!(effective_limit, Some(1));
     }
 
@@ -443,18 +453,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::new(&temp.path().to_string_lossy());
 
-        state
-            .create_instance("inst-1", sample_torrent(1), FakerConfig::default())
-            .await
-            .unwrap();
-        state
-            .create_instance("inst-2", sample_torrent(2), FakerConfig::default())
-            .await
-            .unwrap();
-        state
-            .create_instance("inst-3", sample_torrent(3), FakerConfig::default())
-            .await
-            .unwrap();
+        state.create_instance("inst-1", sample_torrent(1), FakerConfig::default()).await.unwrap();
+        state.create_instance("inst-2", sample_torrent(2), FakerConfig::default()).await.unwrap();
+        state.create_instance("inst-3", sample_torrent(3), FakerConfig::default()).await.unwrap();
 
         // Set all 3 to Running with different elapsed times:
         // inst-1 = 100s (longest), inst-2 = 50s, inst-3 = 10s (most recent)
@@ -495,14 +496,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let state = AppState::new(&temp.path().to_string_lossy());
 
-        state
-            .create_instance("inst-1", sample_torrent(1), FakerConfig::default())
-            .await
-            .unwrap();
-        state
-            .create_instance("inst-2", sample_torrent(2), FakerConfig::default())
-            .await
-            .unwrap();
+        state.create_instance("inst-1", sample_torrent(1), FakerConfig::default()).await.unwrap();
+        state.create_instance("inst-2", sample_torrent(2), FakerConfig::default()).await.unwrap();
 
         // Set limit to 1 active
         let mut settings = MaxActiveSettings::default();
@@ -550,5 +545,49 @@ mod tests {
         assert!(loaded.global_max_active_enabled);
         assert_eq!(loaded.global_min_active, Some(2));
         assert_eq!(loaded.global_max_active, Some(4));
+    }
+
+    #[tokio::test]
+    async fn test_roll_and_apply_max_active_limits() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let mut settings = MaxActiveSettings::default();
+        settings.global_max_active_enabled = true;
+        settings.global_min_active = Some(3);
+        settings.global_max_active = Some(5);
+        state.set_max_active_settings(settings).await.unwrap();
+
+        let updated = roll_and_apply_max_active_limits(&state).await.unwrap();
+        assert!(updated.current_effective_global_limit.is_some());
+        let limit = updated.current_effective_global_limit.unwrap();
+        assert!((3..=5).contains(&limit));
+        assert!(updated.last_randomized_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_scaling_up_respects_start_conditions() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        let mut cfg = FakerConfig::default();
+        cfg.start_when_leechers_above = Some(10); // Condition: leechers > 10
+
+        state.create_instance("inst-1", sample_torrent(1), cfg).await.unwrap();
+
+        let mut settings = MaxActiveSettings::default();
+        settings.global_max_active_enabled = true;
+        settings.global_min_active = Some(1);
+        settings.global_max_active = Some(1);
+        state.set_max_active_settings(settings).await.unwrap();
+
+        let instances_map = state.instances.clone();
+
+        // inst-1 has leechers = 0, so condition (leechers > 10) is NOT met.
+        manage_max_active_and_queue(&state, &instances_map).await;
+
+        // inst-1 should NOT be started because start condition was not satisfied
+        let inst_state = state.get_stats("inst-1").await.unwrap().state;
+        assert!(matches!(inst_state, FakerState::Stopped));
     }
 }
