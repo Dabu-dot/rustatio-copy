@@ -160,7 +160,9 @@ impl InstanceLifecycle for AppState {
         };
 
         faker.stop().await.map_err(|e| e.to_string())?;
-        let stats = faker.stats_snapshot();
+        let mut stats = faker.stats_snapshot();
+        stats.manually_stopped = true;
+        faker.restore_snapshot(stats.clone()).await;
 
         {
             let mut instances = self.instances.write().await;

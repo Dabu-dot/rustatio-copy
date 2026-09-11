@@ -4,9 +4,10 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::Response,
-    routing::{delete, get, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
+use crate::services::scheduler::roll_and_apply_max_active_limits;
 use rustatio_core::{FakerConfig, PresetSettings};
 
 use crate::api::{
@@ -178,6 +179,25 @@ pub async fn set_max_active_settings(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/config/max-active/roll",
+    tag = "config",
+    summary = "Roll and apply max active limits now",
+    description = "Immediately rolls new effective limits, resets the 24h timer, and runs reconciliation.",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Limits rolled and applied", body = ApiSuccess<Object>),
+        (status = 500, description = "Failed to roll limits", body = ApiError)
+    )
+)]
+pub async fn roll_max_active_limits(State(state): State<ServerState>) -> Response {
+    match roll_and_apply_max_active_limits(&state.app).await {
+        Ok(settings) => ApiSuccess::response(settings),
+        Err(e) => ApiError::response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
 pub fn router() -> Router<ServerState> {
     Router::new()
         .route("/config/default", get(get_default_config))
@@ -188,4 +208,5 @@ pub fn router() -> Router<ServerState> {
         .route("/config/default-preset", delete(clear_default_preset))
         .route("/config/max-active", get(get_max_active_settings))
         .route("/config/max-active", put(set_max_active_settings))
+        .route("/config/max-active/roll", post(roll_max_active_limits))
 }

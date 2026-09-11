@@ -7,6 +7,18 @@ export function normalizePresetSettings(settings = {}) {
     ...(settings.idleWhenNoSeeders == null && settings.stopWhenNoSeeders != null
       ? { idleWhenNoSeeders: settings.stopWhenNoSeeders }
       : {}),
+    ...(settings.startWhenLeechersAboveEnabled == null && settings.minLeechersEnabled != null
+      ? { startWhenLeechersAboveEnabled: settings.minLeechersEnabled }
+      : {}),
+    ...(settings.startWhenLeechersAbove == null && settings.minLeechers != null
+      ? { startWhenLeechersAbove: settings.minLeechers }
+      : {}),
+    ...(settings.startWhenSeedersAboveEnabled == null && settings.minSeedersEnabled != null
+      ? { startWhenSeedersAboveEnabled: settings.minSeedersEnabled }
+      : {}),
+    ...(settings.startWhenSeedersAbove == null && settings.minSeeders != null
+      ? { startWhenSeedersAbove: settings.minSeeders }
+      : {}),
   };
 }
 

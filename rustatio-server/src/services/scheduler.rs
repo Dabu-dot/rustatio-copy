@@ -60,6 +60,8 @@ async fn scheduler_loop(
 
     tracing::info!("Scheduler loop started");
 
+    let mut last_30min_scan = std::time::Instant::now();
+
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
@@ -69,7 +71,13 @@ async fn scheduler_loop(
             () = tokio::time::sleep(update_interval) => {
                 let mut dirty = update_instances(&state, &instances).await;
 
-                if manage_max_active_and_queue(&state, &instances).await {
+                let is_30min_scan = last_30min_scan.elapsed() >= Duration::from_secs(1800);
+                if is_30min_scan {
+                    last_30min_scan = std::time::Instant::now();
+                    dirty = true;
+                }
+
+                if manage_max_active_and_queue(&state, &instances, is_30min_scan).await {
                     dirty = true;
                 }
 
@@ -155,6 +163,33 @@ async fn update_instances(
         }
     }
 
+    // Evaluate scrape conditions on active / cyclic instances
+    let active_items: Vec<(String, Arc<RatioFakerHandle>)> = {
+        let guard = instances.read().await;
+        guard
+            .iter()
+            .filter(|(_, inst)| {
+                let stats = inst.faker.stats_snapshot();
+                matches!(stats.state, FakerState::Running | FakerState::Starting)
+                    || stats.is_cyclic_inactive
+            })
+            .map(|(id, inst)| (id.clone(), Arc::clone(&inst.faker)))
+            .collect()
+    };
+
+    for (id, faker) in active_items {
+        if !faker.check_scrape_start_conditions().await {
+            tracing::info!("Instance {} lost scrape conditions during update, transitioning to Idle", id);
+            let _ = faker.stop().await; // Sends Stopped announce to tracker
+            let mut new_stats = faker.stats_snapshot();
+            new_stats.state = FakerState::Idle;
+            new_stats.is_idling = true;
+            new_stats.idling_reason = Some("lost_scrape_conditions".to_string());
+            faker.restore_snapshot(new_stats).await;
+            dirty = true;
+        }
+    }
+
     dirty
 }
 
@@ -198,7 +233,7 @@ pub async fn roll_and_apply_max_active_limits(
     state.set_max_active_settings(settings.clone()).await?;
 
     let instances_map = state.instances.clone();
-    manage_max_active_and_queue(state, &instances_map).await;
+    manage_max_active_and_queue(state, &instances_map, false).await;
 
     Ok(state.get_max_active_settings().await.unwrap_or(settings))
 }
@@ -206,6 +241,7 @@ pub async fn roll_and_apply_max_active_limits(
 async fn manage_max_active_and_queue(
     state: &AppState,
     instances: &Arc<RwLock<HashMap<String, FakerInstance>>>,
+    is_30min_scan: bool,
 ) -> bool {
     let Some(mut settings) = state.get_max_active_settings().await else {
         return false;
@@ -214,9 +250,30 @@ async fn manage_max_active_and_queue(
     let now_secs = now_timestamp();
     let mut settings_modified = false;
 
-    // Check if daily re-randomization is needed (every 86400 seconds)
-    let needs_randomization = settings.last_randomized_at.map_or(true, |last| {
-        now_secs.saturating_sub(last) >= 86400 || settings.current_effective_global_limit.is_none()
+    if is_30min_scan {
+        settings.last_scrape_timestamp = Some(now_secs);
+        settings_modified = true;
+
+        // Clear manually_stopped flag on all instances on 30-min scheduled scan
+        let items: Vec<(String, Arc<RatioFakerHandle>)> = {
+            let guard = instances.read().await;
+            guard.iter().map(|(id, inst)| (id.clone(), Arc::clone(&inst.faker))).collect()
+        };
+        for (_id, faker) in items {
+            let mut stats = faker.stats_snapshot();
+            if stats.manually_stopped {
+                stats.manually_stopped = false;
+                faker.restore_snapshot(stats).await;
+            }
+        }
+    }
+
+    // 24h Timer Downtime Handling & Roll Trigger:
+    // Primary timestamp: last_randomized_at. Fallback: last_scrape_timestamp.
+    let effective_last_timestamp = settings.last_randomized_at.or(settings.last_scrape_timestamp);
+    let needs_randomization = effective_last_timestamp.map_or(true, |last| {
+        now_secs.saturating_sub(last) >= 86400
+            || (settings.global_max_active_enabled && settings.current_effective_global_limit.is_none())
     });
 
     if needs_randomization {
@@ -228,13 +285,16 @@ async fn manage_max_active_and_queue(
         let _ = state.set_max_active_settings(settings.clone()).await;
     }
 
-    // Inspect running vs queued instances
+    // Inspect instance info
     struct InstanceStateInfo {
         id: String,
         state: FakerState,
         tracker_host: String,
         is_paused: bool,
+        is_cyclic_inactive: bool,
+        manually_stopped: bool,
         elapsed_secs: u64,
+        faker: Arc<RatioFakerHandle>,
     }
 
     let instance_states: Vec<InstanceStateInfo> = {
@@ -250,70 +310,71 @@ async fn manage_max_active_and_queue(
                     state: stats.state,
                     tracker_host,
                     is_paused,
+                    is_cyclic_inactive: stats.is_cyclic_inactive,
+                    manually_stopped: stats.manually_stopped,
                     elapsed_secs: stats.elapsed_time.as_secs(),
+                    faker: Arc::clone(&inst.faker),
                 }
             })
             .collect()
     };
 
-    // 1. Reconciliation: Stop excess running instances per-tracker
-    let mut stopped_ids = Vec::new();
-    for (host, &limit) in &settings.current_effective_tracker_limits {
-        let mut running_on_tracker: Vec<&InstanceStateInfo> = instance_states
-            .iter()
-            .filter(|item| {
-                item.tracker_host == *host
-                    && matches!(item.state, FakerState::Running | FakerState::Starting)
-                    && !stopped_ids.contains(&item.id)
-            })
-            .collect();
+    // Rule #1: Trackers do NOT share a combined pool.
+    // Group running instances by tracker_host.
+    // "Active" instances count includes Running, Starting, and Cyclic Inactive (unless lost scrape conditions).
+    let mut tracker_running_map: HashMap<String, Vec<&InstanceStateInfo>> = HashMap::new();
+    for item in &instance_states {
+        if matches!(item.state, FakerState::Running | FakerState::Starting) || item.is_cyclic_inactive {
+            tracker_running_map.entry(item.tracker_host.clone()).or_default().push(item);
+        }
+    }
 
-        if running_on_tracker.len() > limit as usize {
-            // Sort by elapsed_secs ascending (lowest elapsed = most recently started = stopped first)
-            running_on_tracker.sort_by_key(|item| item.elapsed_secs);
-            let excess = running_on_tracker.len() - limit as usize;
-            for item in running_on_tracker.iter().take(excess) {
-                tracing::info!(
-                    "Queue scheduler: Tracker limit ({}) exceeded for {}. Stopping excess instance {}",
-                    limit,
-                    host,
-                    item.id
-                );
-                let _ = state.stop_instance(&item.id).await;
-                stopped_ids.push(item.id.clone());
-                settings_modified = true;
+    // Collect all tracker hosts present in instances or settings
+    let mut all_trackers: Vec<String> = tracker_running_map.keys().cloned().collect();
+    for host in settings.tracker_max_active.keys() {
+        if !all_trackers.contains(host) {
+            all_trackers.push(host.clone());
+        }
+    }
+
+    let default_limit = if settings.global_max_active_enabled {
+        settings.current_effective_global_limit
+    } else {
+        None
+    };
+
+    // 1. Reconciliation: Scale Down (Stop excess running instances per-tracker)
+    for host in &all_trackers {
+        let tracker_limit = settings
+            .current_effective_tracker_limits
+            .get(host)
+            .copied()
+            .or(default_limit);
+
+        let Some(limit) = tracker_limit else {
+            continue;
+        };
+
+        if let Some(running_list) = tracker_running_map.get_mut(host) {
+            if running_list.len() > limit as usize {
+                // Sort by elapsed_secs ascending (lowest elapsed = most recently started = stopped first)
+                running_list.sort_by_key(|item| item.elapsed_secs);
+                let excess = running_list.len() - limit as usize;
+                for item in running_list.iter().take(excess) {
+                    tracing::info!(
+                        "Queue scheduler: Tracker limit ({}) exceeded for {}. Stopping excess instance {}",
+                        limit,
+                        host,
+                        item.id
+                    );
+                    let _ = state.stop_instance(&item.id).await;
+                    settings_modified = true;
+                }
             }
         }
     }
 
-    // 2. Reconciliation: Stop excess running instances globally
-    if let Some(global_limit) = settings.current_effective_global_limit {
-        let mut running_global: Vec<&InstanceStateInfo> = instance_states
-            .iter()
-            .filter(|item| {
-                matches!(item.state, FakerState::Running | FakerState::Starting)
-                    && !stopped_ids.contains(&item.id)
-            })
-            .collect();
-
-        if running_global.len() > global_limit as usize {
-            // Sort by elapsed_secs ascending (lowest elapsed = most recently started = stopped first)
-            running_global.sort_by_key(|item| item.elapsed_secs);
-            let excess = running_global.len() - global_limit as usize;
-            for item in running_global.iter().take(excess) {
-                tracing::info!(
-                    "Queue scheduler: Global limit ({}) exceeded. Stopping excess instance {}",
-                    global_limit,
-                    item.id
-                );
-                let _ = state.stop_instance(&item.id).await;
-                stopped_ids.push(item.id.clone());
-                settings_modified = true;
-            }
-        }
-    }
-
-    // Re-evaluate running counts after reconciliation
+    // Re-evaluate instance states after scale down
     let updated_states: Vec<InstanceStateInfo> = {
         let guard = instances.read().await;
         guard
@@ -327,70 +388,66 @@ async fn manage_max_active_and_queue(
                     state: stats.state,
                     tracker_host,
                     is_paused,
+                    is_cyclic_inactive: stats.is_cyclic_inactive,
+                    manually_stopped: stats.manually_stopped,
                     elapsed_secs: stats.elapsed_time.as_secs(),
+                    faker: Arc::clone(&inst.faker),
                 }
             })
             .collect()
     };
 
-    let mut running_by_tracker: HashMap<String, u32> = HashMap::new();
-    let mut total_running = 0u32;
-    let mut candidates_to_start = Vec::new();
+    // 2. Reconciliation: Scale Up (Fill available slots per tracker)
+    let mut running_count_by_tracker: HashMap<String, usize> = HashMap::new();
+    let mut candidates_by_tracker: HashMap<String, Vec<&InstanceStateInfo>> = HashMap::new();
 
     for item in &updated_states {
-        if matches!(item.state, FakerState::Running | FakerState::Starting) {
-            total_running += 1;
-            *running_by_tracker.entry(item.tracker_host.clone()).or_default() += 1;
-        } else if matches!(item.state, FakerState::Stopped | FakerState::Idle) && !item.is_paused {
-            candidates_to_start.push(item);
+        if matches!(item.state, FakerState::Running | FakerState::Starting) || item.is_cyclic_inactive {
+            *running_count_by_tracker.entry(item.tracker_host.clone()).or_default() += 1;
+        } else if matches!(item.state, FakerState::Stopped | FakerState::Idle) && !item.is_paused && !item.manually_stopped {
+            candidates_by_tracker.entry(item.tracker_host.clone()).or_default().push(item);
         }
     }
 
-    if candidates_to_start.is_empty() {
-        return settings_modified;
-    }
+    for (host, candidates) in candidates_by_tracker.iter_mut() {
+        let tracker_limit = settings
+            .current_effective_tracker_limits
+            .get(host)
+            .copied()
+            .or(default_limit);
 
-    // Check global limit constraint
-    if let Some(global_limit) = settings.current_effective_global_limit {
-        if total_running >= global_limit {
-            return settings_modified;
-        }
-    }
+        let Some(limit) = tracker_limit else {
+            continue;
+        };
 
-    // Filter candidates that fit under their tracker's limit
-    let eligible_candidates: Vec<&InstanceStateInfo> = candidates_to_start
-        .into_iter()
-        .filter(|item| {
-            if let Some(&tr_limit) =
-                settings.current_effective_tracker_limits.get(&item.tracker_host)
-            {
-                let current_tr_running =
-                    running_by_tracker.get(&item.tracker_host).copied().unwrap_or(0);
-                if current_tr_running >= tr_limit {
-                    return false;
+        let mut current_running = running_count_by_tracker.get(host).copied().unwrap_or(0);
+
+        while current_running < limit as usize && !candidates.is_empty() {
+            // Randomly pick candidate
+            let idx = {
+                let mut rng = rand::rng();
+                rng.random_range(0..candidates.len())
+            };
+            let candidate = candidates.remove(idx);
+
+            // Scrape Conditions Check (Eligibility Filter)
+            if candidate.faker.check_scrape_start_conditions().await {
+                tracing::info!("Queue scheduler: Starting eligible candidate {} for tracker {}", candidate.id, host);
+                if state.start_instance(&candidate.id).await.is_ok() {
+                    current_running += 1;
+                    running_count_by_tracker.insert(host.clone(), current_running);
+                    settings_modified = true;
                 }
+            } else {
+                // If candidate fails scrape conditions, mark/leave as Idle and test another candidate
+                let mut new_stats = candidate.faker.stats_snapshot();
+                new_stats.state = FakerState::Idle;
+                new_stats.is_idling = true;
+                new_stats.idling_reason = Some("lost_scrape_conditions".to_string());
+                candidate.faker.restore_snapshot(new_stats).await;
+                tracing::info!("Candidate {} failed scrape conditions, keeping Idle", candidate.id);
             }
-            true
-        })
-        .collect();
-
-    if eligible_candidates.is_empty() {
-        return settings_modified;
-    }
-
-    // Randomly select one eligible candidate to start
-    let selected_id = {
-        let mut rng = rand::rng();
-        let idx = rng.random_range(0..eligible_candidates.len());
-        eligible_candidates[idx].id.clone()
-    };
-
-    tracing::info!("Queue scheduler: Starting next queued instance {}", selected_id);
-
-    if let Err(e) = state.start_instance(&selected_id).await {
-        tracing::warn!("Queue scheduler: Failed to start instance {}: {}", selected_id, e);
-    } else {
-        settings_modified = true;
+        }
     }
 
     settings_modified
@@ -440,7 +497,7 @@ mod tests {
 
         // Initially both inst-1 and inst-2 are Stopped.
         // Queue scheduler should attempt to start one instance up to global limit = 1.
-        let changed = manage_max_active_and_queue(&state, &instances_map).await;
+        let changed = manage_max_active_and_queue(&state, &instances_map, false).await;
         assert!(changed);
 
         let effective_limit =
@@ -478,7 +535,8 @@ mod tests {
         state.set_max_active_settings(settings).await.unwrap();
 
         let instances_map = state.instances.clone();
-        manage_max_active_and_queue(&state, &instances_map).await;
+        manage_max_active_and_queue(&state, &instances_map, false).await;
+        manage_max_active_and_queue(&state, &instances_map, false).await;
 
         // Verify inst-1 (100s elapsed, longest running) is still running
         // and inst-2 and inst-3 (most recently started) were stopped
@@ -584,10 +642,10 @@ mod tests {
         let instances_map = state.instances.clone();
 
         // inst-1 has leechers = 0, so condition (leechers > 10) is NOT met.
-        manage_max_active_and_queue(&state, &instances_map).await;
+        manage_max_active_and_queue(&state, &instances_map, false).await;
 
-        // inst-1 should NOT be started because start condition was not satisfied
+        // inst-1 should NOT be started because start condition was not satisfied (marked Idle)
         let inst_state = state.get_stats("inst-1").await.unwrap().state;
-        assert!(matches!(inst_state, FakerState::Stopped));
+        assert!(matches!(inst_state, FakerState::Idle));
     }
 }
