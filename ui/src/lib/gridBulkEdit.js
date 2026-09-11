@@ -277,7 +277,11 @@ export function applyPresetToBulkState(state, preset) {
     settings.startWhenSeedersAboveEnabled != null ||
     settings.startWhenSeedersAbove != null
   ) {
-    next.sections.startConditions = next.sections.startConditions || { apply: false, mixed: false, value: {} };
+    next.sections.startConditions = next.sections.startConditions || {
+      apply: false,
+      mixed: false,
+      value: {},
+    };
     next.sections.startConditions.apply = true;
     next.sections.startConditions.value = {
       ...next.sections.startConditions.value,
@@ -305,7 +309,11 @@ export function applyPresetToBulkState(state, preset) {
     settings.resetSessionCountersOnCycle != null ||
     settings.inactiveMode != null
   ) {
-    next.sections.cyclicIntervals = next.sections.cyclicIntervals || { apply: false, mixed: false, value: {} };
+    next.sections.cyclicIntervals = next.sections.cyclicIntervals || {
+      apply: false,
+      mixed: false,
+      value: {},
+    };
     next.sections.cyclicIntervals.apply = true;
     next.sections.cyclicIntervals.value = {
       ...next.sections.cyclicIntervals.value,

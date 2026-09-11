@@ -684,7 +684,11 @@
                     type="number"
                     bind:value={maxActiveSettings.global_min_active}
                     min="1"
-                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium {Number(maxActiveSettings.global_min_active) > Number(maxActiveSettings.global_max_active) ? 'border-stat-leecher text-stat-leecher' : ''}"
+                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium {Number(
+                      maxActiveSettings.global_min_active
+                    ) > Number(maxActiveSettings.global_max_active)
+                      ? 'border-stat-leecher text-stat-leecher'
+                      : ''}"
                     onchange={saveMaxActiveSettings}
                   />
                   <span>to</span>
@@ -692,7 +696,11 @@
                     type="number"
                     bind:value={maxActiveSettings.global_max_active}
                     min="1"
-                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium {Number(maxActiveSettings.global_min_active) > Number(maxActiveSettings.global_max_active) ? 'border-stat-leecher text-stat-leecher' : ''}"
+                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium {Number(
+                      maxActiveSettings.global_min_active
+                    ) > Number(maxActiveSettings.global_max_active)
+                      ? 'border-stat-leecher text-stat-leecher'
+                      : ''}"
                     onchange={saveMaxActiveSettings}
                   />
                   <span class="text-muted-foreground">active torrents</span>
