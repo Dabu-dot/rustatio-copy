@@ -482,7 +482,7 @@ export const instanceActions = {
     }
     return null;
   },
-  saveMaxActiveSettings: async (settings) => {
+  saveMaxActiveSettings: async settings => {
     try {
       if (typeof api.setMaxActiveSettings === 'function') {
         await api.setMaxActiveSettings(settings);
