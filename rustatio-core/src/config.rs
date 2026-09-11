@@ -280,6 +280,63 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
+    use crate::faker::{InactiveMode, PresetSettings};
+    use crate::torrent::ClientType;
+
+    #[test]
+    fn test_preset_settings_full_serialization_roundtrip() {
+        let preset = PresetSettings {
+            upload_rate: Some(150.0),
+            download_rate: Some(300.0),
+            port: Some(51413),
+            vpn_port_sync: Some(true),
+            selected_client: Some(ClientType::QBittorrent),
+            selected_client_version: Some("4.6.0".to_string()),
+            completion_percent: Some(85.0),
+            randomize_rates: Some(true),
+            random_range_percent: Some(20.0),
+            randomize_ratio: Some(true),
+            random_ratio_range_percent: Some(10.0),
+            stop_at_ratio_enabled: Some(true),
+            stop_at_ratio: Some(2.5),
+            stop_at_uploaded_enabled: Some(true),
+            stop_at_uploaded_gb: Some(10.0),
+            stop_at_downloaded_enabled: Some(true),
+            stop_at_downloaded_gb: Some(5.0),
+            stop_at_seed_time_enabled: Some(true),
+            stop_at_seed_time_hours: Some(24.0),
+            idle_when_no_leechers: Some(true),
+            idle_when_no_seeders: Some(true),
+            post_stop_action: Some("stop_seeding".to_string()),
+            progressive_rates_enabled: Some(true),
+            target_upload_rate: Some(500.0),
+            target_download_rate: Some(1000.0),
+            progressive_duration_hours: Some(2.0),
+            start_when_leechers_above_enabled: Some(true),
+            start_when_leechers_above: Some(5),
+            min_leechers_enabled: Some(true),
+            min_leechers: Some(5),
+            start_when_seeders_above_enabled: Some(true),
+            start_when_seeders_above: Some(10),
+            min_seeders_enabled: Some(true),
+            min_seeders: Some(10),
+            cyclic_enabled: Some(true),
+            min_active_duration_hours: Some(4.0),
+            max_active_duration_hours: Some(8.0),
+            min_inactive_duration_hours: Some(1.0),
+            max_inactive_duration_hours: Some(2.0),
+            reset_session_counters_on_cycle: Some(false),
+            inactive_mode: Some(InactiveMode::Stopped),
+        };
+
+        let json = serde_json::to_string(&preset).expect("preset serialization failed");
+        let restored: PresetSettings = serde_json::from_str(&json).expect("preset deserialization failed");
+
+        assert_eq!(restored.upload_rate, Some(150.0));
+        assert_eq!(restored.stop_at_ratio, Some(2.5));
+        assert_eq!(restored.post_stop_action.as_deref(), Some("stop_seeding"));
+        assert_eq!(restored.inactive_mode, Some(InactiveMode::Stopped));
+    }
     use super::*;
     use std::sync::Mutex;
 

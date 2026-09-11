@@ -1361,19 +1361,18 @@ impl RatioFaker {
                     scrape_response.incomplete
                 );
 
-                if self.check_scrape_start_conditions() {
-                    if self.stats.stop_condition_met
-                        || matches!(self.stats.state, FakerState::Stopped)
-                    {
-                        log_info!(
-                            "Scrape start condition met (seeders={}, leechers={}), starting/resuming torrent: {}",
-                            self.stats.seeders,
-                            self.stats.leechers,
-                            self.torrent.name
-                        );
-                        self.reset_session_counters();
-                        let _ = self.resume();
-                    }
+                if self.check_scrape_start_conditions()
+                    && (self.stats.stop_condition_met
+                        || matches!(self.stats.state, FakerState::Stopped))
+                {
+                    log_info!(
+                        "Scrape start condition met (seeders={}, leechers={}), starting/resuming torrent: {}",
+                        self.stats.seeders,
+                        self.stats.leechers,
+                        self.torrent.name
+                    );
+                    self.reset_session_counters();
+                    let _ = self.resume();
                 }
             }
             Err(e) => {
@@ -3059,6 +3058,46 @@ mod tests {
 
         assert!(!faker.stats.is_cyclic_inactive);
         assert!(faker.stats.cyclic_next_switch_ms.is_some());
+    }
+
+    #[test]
+    fn test_manually_stopped_flag_respected_on_stop() {
+        let torrent = Arc::new(TorrentInfo {
+            info_hash: [28u8; 20],
+            announce: "https://tracker.test/announce".to_string(),
+            announce_list: None,
+            name: "sample".to_string(),
+            total_size: 1024,
+            piece_length: 256,
+            num_pieces: 4,
+            creation_date: None,
+            comment: None,
+            created_by: None,
+            is_single_file: true,
+            file_count: 1,
+            files: Vec::new(),
+        });
+
+        let faker = RatioFaker::new(torrent, FakerConfig::default(), None);
+        assert!(faker.is_ok());
+        let mut faker = faker.unwrap();
+
+        faker.stats.state = FakerState::Running;
+        faker.stats.manually_stopped = true;
+
+        let plan = faker.begin_stop();
+        assert!(plan.is_some());
+        faker.apply_stop_result(Ok(AnnounceResponse {
+            interval: 1800,
+            min_interval: None,
+            tracker_id: None,
+            complete: 10,
+            incomplete: 2,
+            warning: None,
+        }));
+
+        assert!(matches!(faker.stats.state, FakerState::Stopped));
+        assert!(faker.stats.manually_stopped);
     }
 
     #[test]

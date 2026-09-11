@@ -43,6 +43,7 @@ mod tests {
             watch: Arc::new(RwLock::new(None)),
             default_config: Arc::new(RwLock::new(None)),
             watch_settings: Arc::new(RwLock::new(None)),
+            max_active_settings: Arc::new(RwLock::new(None)),
             should_exit: Arc::new(AtomicBool::new(false)),
             close_prompt_open: Arc::new(AtomicBool::new(false)),
             peer_listener: Arc::new(RwLock::new(None)),

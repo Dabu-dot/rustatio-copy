@@ -230,7 +230,9 @@ pub fn now_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::WatchSettings;
+    use super::*;
+    use rustatio_core::faker::InactiveMode;
+    use rustatio_core::{FakerConfig, FakerState, PostStopAction, TorrentSummary};
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -252,5 +254,152 @@ mod tests {
         assert!(!settings.auto_start);
 
         std::env::remove_var("WATCH_AUTO_START");
+    }
+
+    #[test]
+    fn test_persisted_state_full_serialization_roundtrip() {
+        let config = FakerConfig {
+            upload_rate: 150.0,
+            download_rate: 300.0,
+            port: 51413,
+            vpn_port_sync: true,
+            client_type: rustatio_core::ClientType::QBittorrent,
+            client_version: Some("4.6.0".to_string()),
+            initial_uploaded: 102400,
+            initial_downloaded: 51200,
+            completion_percent: 75.0,
+            num_want: 100,
+            randomize_rates: true,
+            random_range_percent: 15.0,
+            randomize_ratio: true,
+            random_ratio_range_percent: 5.0,
+            stop_at_ratio: Some(2.5),
+            effective_stop_at_ratio: Some(2.48),
+            stop_at_uploaded: Some(1073741824),
+            stop_at_downloaded: Some(536870912),
+            stop_at_seed_time: Some(86400),
+            idle_when_no_leechers: true,
+            idle_when_no_seeders: true,
+            scrape_interval: 120,
+            progressive_rates: true,
+            target_upload_rate: Some(500.0),
+            target_download_rate: Some(1000.0),
+            progressive_duration: 7200,
+            post_stop_action: PostStopAction::StopSeeding,
+            start_when_leechers_above: Some(5),
+            start_when_seeders_above: Some(10),
+            cyclic_enabled: true,
+            min_active_duration: 18000,
+            max_active_duration: 28800,
+            min_inactive_duration: 3600,
+            max_inactive_duration: 7200,
+            reset_session_counters_on_cycle: false,
+            inactive_mode: InactiveMode::Stopped,
+        };
+
+        let runtime = PersistedRuntime {
+            uploaded: 204800,
+            downloaded: 102400,
+            ratio: 2.0,
+            left: 25600,
+            torrent_completion: 75.0,
+            seeders: 42,
+            leechers: 12,
+            session_uploaded: 102400,
+            session_downloaded: 51200,
+            session_ratio: 1.0,
+            elapsed_secs: 3600,
+            current_upload_rate: 150.0,
+            current_download_rate: 300.0,
+            average_upload_rate: 140.0,
+            average_download_rate: 280.0,
+            upload_progress: 50.0,
+            download_progress: 25.0,
+            ratio_progress: 80.0,
+            seed_time_progress: 100.0,
+            effective_stop_at_ratio: Some(2.48),
+            eta_ratio_secs: Some(1800),
+            eta_uploaded_secs: Some(3600),
+            eta_seed_time_secs: Some(0),
+            eta_download_completion_secs: Some(600),
+            stop_condition_met: false,
+            is_idling: false,
+            idling_reason: None,
+            tracker_error: None,
+            announce_count: 5,
+            is_cyclic_inactive: false,
+            cyclic_next_switch_ms: Some(1700000000000),
+            manually_stopped: false,
+        };
+
+        let instance = PersistedInstance {
+            id: "inst-1".to_string(),
+            torrent: TorrentSummary {
+                info_hash: [1u8; 20],
+                name: "test-torrent.iso".to_string(),
+                total_size: 1073741824,
+                file_count: 1,
+                announce: "https://tracker.example.com/announce".to_string(),
+                announce_list: None,
+                piece_length: 256,
+                num_pieces: 4,
+                creation_date: None,
+                comment: None,
+                created_by: None,
+                is_single_file: true,
+            },
+            config: config.clone(),
+            cumulative_uploaded: 204800,
+            cumulative_downloaded: 102400,
+            state: FakerState::Running,
+            created_at: 1000,
+            updated_at: 2000,
+            source: InstanceSource::WatchFolder,
+            tags: vec!["ubuntu".to_string(), "iso".to_string()],
+            runtime: Some(runtime.clone()),
+        };
+
+        let mut instances = HashMap::new();
+        instances.insert("inst-1".to_string(), instance);
+
+        let max_active = MaxActiveSettings {
+            global_max_active_enabled: true,
+            global_min_active: Some(2),
+            global_max_active: Some(5),
+            current_effective_global_limit: Some(3),
+            tracker_max_active: HashMap::new(),
+            current_effective_tracker_limits: HashMap::new(),
+            last_randomized_at: Some(1700000000),
+            last_scrape_timestamp: Some(1700000000),
+        };
+
+        let state = PersistedState {
+            instances,
+            default_config: Some(config),
+            default_preset: None,
+            watch_settings: Some(WatchSettings { max_depth: 2, auto_start: true }),
+            custom_presets: Vec::new(),
+            max_active_settings: Some(max_active),
+            version: 1,
+        };
+
+        let json_str = serde_json::to_string(&state).expect("serialization failed");
+        let deserialized: PersistedState = serde_json::from_str(&json_str).expect("deserialization failed");
+
+        assert_eq!(deserialized.version, 1);
+        let restored_inst = deserialized.instances.get("inst-1").expect("instance missing");
+        assert_eq!(restored_inst.id, "inst-1");
+        assert_eq!(restored_inst.config.upload_rate, 150.0);
+        assert_eq!(restored_inst.config.inactive_mode, InactiveMode::Stopped);
+        assert_eq!(restored_inst.tags, vec!["ubuntu", "iso"]);
+
+        let restored_rt = restored_inst.runtime.as_ref().expect("runtime missing");
+        assert_eq!(restored_rt.uploaded, 204800);
+        assert_eq!(restored_rt.seeders, 42);
+        assert_eq!(restored_rt.cyclic_next_switch_ms, Some(1700000000000));
+
+        let restored_ma = deserialized.max_active_settings.as_ref().expect("max_active missing");
+        assert!(restored_ma.global_max_active_enabled);
+        assert_eq!(restored_ma.current_effective_global_limit, Some(3));
     }
 }
