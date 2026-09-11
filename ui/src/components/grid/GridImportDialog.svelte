@@ -89,6 +89,18 @@
   let stopAtSeedTimeHours = $state(24);
   let idleWhenNoLeechers = $state(false);
   let idleWhenNoSeeders = $state(false);
+  let postStopAction = $state('idle');
+  let startWhenLeechersAboveEnabled = $state(false);
+  let startWhenLeechersAbove = $state(0);
+  let startWhenSeedersAboveEnabled = $state(false);
+  let startWhenSeedersAbove = $state(0);
+  let cyclicEnabled = $state(false);
+  let minActiveDurationHours = $state(4);
+  let maxActiveDurationHours = $state(4);
+  let minInactiveDurationHours = $state(2);
+  let maxInactiveDurationHours = $state(2);
+  let resetSessionCountersOnCycle = $state(true);
+  let inactiveMode = $state('idle');
   let advancedOpen = $state(false);
 
   // Import state
@@ -187,6 +199,21 @@
     if (s.stopAtSeedTimeHours != null) stopAtSeedTimeHours = s.stopAtSeedTimeHours;
     if (s.idleWhenNoLeechers != null) idleWhenNoLeechers = s.idleWhenNoLeechers;
     if (s.idleWhenNoSeeders != null) idleWhenNoSeeders = s.idleWhenNoSeeders;
+    if (s.postStopAction != null) postStopAction = s.postStopAction;
+    if (s.startWhenLeechersAboveEnabled != null)
+      startWhenLeechersAboveEnabled = s.startWhenLeechersAboveEnabled;
+    if (s.startWhenLeechersAbove != null) startWhenLeechersAbove = s.startWhenLeechersAbove;
+    if (s.startWhenSeedersAboveEnabled != null)
+      startWhenSeedersAboveEnabled = s.startWhenSeedersAboveEnabled;
+    if (s.startWhenSeedersAbove != null) startWhenSeedersAbove = s.startWhenSeedersAbove;
+    if (s.cyclicEnabled != null) cyclicEnabled = s.cyclicEnabled;
+    if (s.minActiveDurationHours != null) minActiveDurationHours = s.minActiveDurationHours;
+    if (s.maxActiveDurationHours != null) maxActiveDurationHours = s.maxActiveDurationHours;
+    if (s.minInactiveDurationHours != null) minInactiveDurationHours = s.minInactiveDurationHours;
+    if (s.maxInactiveDurationHours != null) maxInactiveDurationHours = s.maxInactiveDurationHours;
+    if (s.resetSessionCountersOnCycle != null)
+      resetSessionCountersOnCycle = s.resetSessionCountersOnCycle;
+    if (s.inactiveMode != null) inactiveMode = s.inactiveMode;
     if (s.updateIntervalSeconds != null) updateIntervalSeconds = s.updateIntervalSeconds;
     if (s.scrapeInterval != null) scrapeInterval = s.scrapeInterval;
   }
@@ -364,6 +391,18 @@
       stopAtSeedTimeHours: stopAtSeedTimeEnabled ? parseFloat(stopAtSeedTimeHours) : undefined,
       idleWhenNoLeechers,
       idleWhenNoSeeders,
+      postStopAction,
+      startWhenLeechersAboveEnabled,
+      startWhenLeechersAbove: startWhenLeechersAboveEnabled ? parseInt(startWhenLeechersAbove) : undefined,
+      startWhenSeedersAboveEnabled,
+      startWhenSeedersAbove: startWhenSeedersAboveEnabled ? parseInt(startWhenSeedersAbove) : undefined,
+      cyclicEnabled,
+      minActiveDurationHours: parseFloat(minActiveDurationHours),
+      maxActiveDurationHours: parseFloat(maxActiveDurationHours),
+      minInactiveDurationHours: parseFloat(minInactiveDurationHours),
+      maxInactiveDurationHours: parseFloat(maxInactiveDurationHours),
+      resetSessionCountersOnCycle,
+      inactiveMode,
       progressiveRatesEnabled,
       targetUploadRate: progressiveRatesEnabled ? parseFloat(targetUploadRate) : undefined,
       targetDownloadRate: progressiveRatesEnabled ? parseFloat(targetDownloadRate) : undefined,
@@ -958,6 +997,18 @@
                 bind:stopAtSeedTimeHours
                 bind:idleWhenNoLeechers
                 bind:idleWhenNoSeeders
+                bind:postStopAction
+                bind:startWhenLeechersAboveEnabled
+                bind:startWhenLeechersAbove
+                bind:startWhenSeedersAboveEnabled
+                bind:startWhenSeedersAbove
+                bind:cyclicEnabled
+                bind:minActiveDurationHours
+                bind:maxActiveDurationHours
+                bind:minInactiveDurationHours
+                bind:maxInactiveDurationHours
+                bind:resetSessionCountersOnCycle
+                bind:inactiveMode
                 {completionPercent}
               />
             </div>

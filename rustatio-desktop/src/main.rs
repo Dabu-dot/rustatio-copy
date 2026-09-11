@@ -235,6 +235,7 @@ fn main() {
     let saved_instances_map = saved_state.instances;
     let saved_default_config = saved_state.default_config.clone();
     let saved_watch_settings = saved_state.watch_settings;
+    let saved_max_active_settings = saved_state.max_active_settings;
 
     // Keep references for exit handler
     let fakers_for_exit = Arc::new(RwLock::new(HashMap::new()));
@@ -251,6 +252,7 @@ fn main() {
         watch: Arc::new(RwLock::new(None)),
         default_config: Arc::new(RwLock::new(saved_default_config)),
         watch_settings: Arc::new(RwLock::new(saved_watch_settings)),
+        max_active_settings: Arc::new(RwLock::new(saved_max_active_settings)),
         should_exit: Arc::clone(&should_exit),
         close_prompt_open: Arc::clone(&close_prompt_open),
         peer_listener: Arc::new(RwLock::new(None)),
@@ -314,6 +316,8 @@ fn main() {
             commands::get_default_config,
             commands::set_default_config,
             commands::clear_default_config,
+            commands::get_max_active_settings,
+            commands::set_max_active_settings,
             commands::close_to_tray,
             commands::quit_app,
             commands::cancel_close_prompt,

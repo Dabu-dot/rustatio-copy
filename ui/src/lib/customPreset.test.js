@@ -38,10 +38,21 @@ function makeInstance() {
     idleWhenNoLeechers: true,
     idleWhenNoSeeders: false,
     postStopAction: 'pause',
+    startWhenLeechersAboveEnabled: true,
+    startWhenLeechersAbove: 5,
+    startWhenSeedersAboveEnabled: false,
+    startWhenSeedersAbove: 0,
+    cyclicEnabled: true,
+    minActiveDurationHours: 4,
+    maxActiveDurationHours: 6,
+    minInactiveDurationHours: 2,
+    maxInactiveDurationHours: 3,
+    resetSessionCountersOnCycle: true,
+    inactiveMode: 'idle',
   };
 }
 
-test('buildCustomPreset creates a storable custom preset', () => {
+test('buildCustomPreset creates a storable custom preset with issue 167 features', () => {
   const now = new Date('2026-03-27T12:00:00.000Z');
   const preset = buildCustomPreset(makeInstance(), {
     id: 'custom-fixed',
@@ -57,6 +68,11 @@ test('buildCustomPreset creates a storable custom preset', () => {
   assert.equal(preset.created_at, '2026-03-27T12:00:00.000Z');
   assert.equal(preset.settings.selectedClient, 'qbittorrent');
   assert.equal(preset.settings.postStopAction, 'pause');
+  assert.equal(preset.settings.startWhenLeechersAboveEnabled, true);
+  assert.equal(preset.settings.startWhenLeechersAbove, 5);
+  assert.equal(preset.settings.cyclicEnabled, true);
+  assert.equal(preset.settings.minActiveDurationHours, 4);
+  assert.equal(preset.settings.inactiveMode, 'idle');
 });
 
 test('buildPresetExportData wraps preset data for file export', () => {

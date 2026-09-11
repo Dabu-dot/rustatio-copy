@@ -75,6 +75,17 @@
   let idleWhenNoLeechers = $state(false);
   let idleWhenNoSeeders = $state(false);
   let postStopAction = $state('idle');
+  let startWhenLeechersAboveEnabled = $state(false);
+  let startWhenLeechersAbove = $state(0);
+  let startWhenSeedersAboveEnabled = $state(false);
+  let startWhenSeedersAbove = $state(0);
+  let cyclicEnabled = $state(false);
+  let minActiveDurationHours = $state(4);
+  let maxActiveDurationHours = $state(4);
+  let minInactiveDurationHours = $state(2);
+  let maxInactiveDurationHours = $state(2);
+  let resetSessionCountersOnCycle = $state(true);
+  let inactiveMode = $state('idle');
 
   let selectedCount = $derived(selectedIds.length);
   let allPresets = $derived([...builtInPresets, ...normalizePresets(customPresets)]);
@@ -156,6 +167,17 @@
     idleWhenNoLeechers = stopConditions.idleWhenNoLeechers ?? false;
     idleWhenNoSeeders = stopConditions.idleWhenNoSeeders ?? false;
     postStopAction = stopConditions.postStopAction || 'idle';
+    startWhenLeechersAboveEnabled = stopConditions.startWhenLeechersAboveEnabled ?? false;
+    startWhenLeechersAbove = stopConditions.startWhenLeechersAbove ?? 0;
+    startWhenSeedersAboveEnabled = stopConditions.startWhenSeedersAboveEnabled ?? false;
+    startWhenSeedersAbove = stopConditions.startWhenSeedersAbove ?? 0;
+    cyclicEnabled = stopConditions.cyclicEnabled ?? false;
+    minActiveDurationHours = stopConditions.minActiveDurationHours ?? 4;
+    maxActiveDurationHours = stopConditions.maxActiveDurationHours ?? 4;
+    minInactiveDurationHours = stopConditions.minInactiveDurationHours ?? 2;
+    maxInactiveDurationHours = stopConditions.maxInactiveDurationHours ?? 2;
+    resetSessionCountersOnCycle = stopConditions.resetSessionCountersOnCycle ?? true;
+    inactiveMode = stopConditions.inactiveMode || 'idle';
   });
 
   function autoEnable(sectionKey, updates) {
@@ -214,6 +236,17 @@
       targetUploadRate: config.target_upload_rate || 100,
       targetDownloadRate: config.target_download_rate || 200,
       progressiveDurationHours: (config.progressive_duration || 3600) / 3600,
+      startWhenLeechersAboveEnabled: config.start_when_leechers_above !== null && config.start_when_leechers_above !== undefined,
+      startWhenLeechersAbove: config.start_when_leechers_above || 0,
+      startWhenSeedersAboveEnabled: config.start_when_seeders_above !== null && config.start_when_seeders_above !== undefined,
+      startWhenSeedersAbove: config.start_when_seeders_above || 0,
+      cyclicEnabled: config.cyclic_enabled || false,
+      minActiveDurationHours: (config.min_active_duration || 14400) / 3600,
+      maxActiveDurationHours: (config.max_active_duration || 14400) / 3600,
+      minInactiveDurationHours: (config.min_inactive_duration || 7200) / 3600,
+      maxInactiveDurationHours: (config.max_inactive_duration || 7200) / 3600,
+      resetSessionCountersOnCycle: config.reset_session_counters_on_cycle ?? true,
+      inactiveMode: config.inactive_mode || 'idle',
     };
   }
 
@@ -252,6 +285,17 @@
       targetUploadRate: 100,
       targetDownloadRate: 200,
       progressiveDurationHours: 1,
+      startWhenLeechersAboveEnabled: false,
+      startWhenLeechersAbove: 0,
+      startWhenSeedersAboveEnabled: false,
+      startWhenSeedersAbove: 0,
+      cyclicEnabled: false,
+      minActiveDurationHours: 4,
+      maxActiveDurationHours: 4,
+      minInactiveDurationHours: 2,
+      maxInactiveDurationHours: 2,
+      resetSessionCountersOnCycle: true,
+      inactiveMode: 'idle',
     };
   }
 
@@ -290,6 +334,17 @@
       targetUploadRate: instance.targetUploadRate,
       targetDownloadRate: instance.targetDownloadRate,
       progressiveDurationHours: instance.progressiveDurationHours,
+      startWhenLeechersAboveEnabled: instance.startWhenLeechersAboveEnabled ?? false,
+      startWhenLeechersAbove: instance.startWhenLeechersAbove ?? 0,
+      startWhenSeedersAboveEnabled: instance.startWhenSeedersAboveEnabled ?? false,
+      startWhenSeedersAbove: instance.startWhenSeedersAbove ?? 0,
+      cyclicEnabled: instance.cyclicEnabled ?? false,
+      minActiveDurationHours: instance.minActiveDurationHours ?? 4,
+      maxActiveDurationHours: instance.maxActiveDurationHours ?? 4,
+      minInactiveDurationHours: instance.minInactiveDurationHours ?? 2,
+      maxInactiveDurationHours: instance.maxInactiveDurationHours ?? 2,
+      resetSessionCountersOnCycle: instance.resetSessionCountersOnCycle ?? true,
+      inactiveMode: instance.inactiveMode || 'idle',
     };
   }
 
@@ -808,6 +863,17 @@
               bind:idleWhenNoLeechers
               bind:idleWhenNoSeeders
               bind:postStopAction
+              bind:startWhenLeechersAboveEnabled
+              bind:startWhenLeechersAbove
+              bind:startWhenSeedersAboveEnabled
+              bind:startWhenSeedersAbove
+              bind:cyclicEnabled
+              bind:minActiveDurationHours
+              bind:maxActiveDurationHours
+              bind:minInactiveDurationHours
+              bind:maxInactiveDurationHours
+              bind:resetSessionCountersOnCycle
+              bind:inactiveMode
               {completionPercent}
               onchange={updates => autoEnable('stopConditions', updates)}
             />

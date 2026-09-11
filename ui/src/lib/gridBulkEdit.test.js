@@ -103,6 +103,27 @@ test('applyPresetToBulkState overwrites only preset fields', () => {
   assert.equal(next.sections.stopConditions.value.postStopAction, 'stop_seeding');
 });
 
+test('applyPresetToBulkState supports issue 167 start conditions and cyclic settings', () => {
+  const state = createBulkEditState([makeInstance()]);
+  const next = applyPresetToBulkState(state, {
+    id: 'cyclic-preset',
+    settings: {
+      startWhenLeechersAboveEnabled: true,
+      startWhenLeechersAbove: 10,
+      cyclicEnabled: true,
+      minActiveDurationHours: 3,
+      inactiveMode: 'stopped',
+    },
+  });
+
+  assert.equal(next.sections.stopConditions.apply, true);
+  assert.equal(next.sections.stopConditions.value.startWhenLeechersAboveEnabled, true);
+  assert.equal(next.sections.stopConditions.value.startWhenLeechersAbove, 10);
+  assert.equal(next.sections.stopConditions.value.cyclicEnabled, true);
+  assert.equal(next.sections.stopConditions.value.minActiveDurationHours, 3);
+  assert.equal(next.sections.stopConditions.value.inactiveMode, 'stopped');
+});
+
 test('applyPresetToBulkState supports legacy stopWhenNo aliases', () => {
   const state = createBulkEditState([makeInstance()]);
   const next = applyPresetToBulkState(state, {

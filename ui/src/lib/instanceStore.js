@@ -318,6 +318,9 @@ export const globalConfig = writable(null);
 // Writable store for active instance (manually updated to avoid orphan effect in Svelte 5)
 export const activeInstance = writable(null);
 
+// Store for max active settings
+export const maxActiveSettings = writable(null);
+
 // Export saveSession for use in App.svelte
 export { saveSession };
 
@@ -467,9 +470,34 @@ async function loadDesktopRestoredInstances(config) {
 
 // Actions
 export const instanceActions = {
+  loadMaxActiveSettings: async () => {
+    try {
+      if (typeof api.getMaxActiveSettings === 'function') {
+        const settings = await api.getMaxActiveSettings();
+        maxActiveSettings.set(settings || null);
+        return settings;
+      }
+    } catch (e) {
+      console.warn('Failed to load max active settings:', e);
+    }
+    return null;
+  },
+  saveMaxActiveSettings: async (settings) => {
+    try {
+      if (typeof api.setMaxActiveSettings === 'function') {
+        await api.setMaxActiveSettings(settings);
+        maxActiveSettings.set(settings);
+      }
+    } catch (e) {
+      console.error('Failed to save max active settings:', e);
+      throw e;
+    }
+  },
+
   // Initialize - create first instance or restore from storage/server
   initialize: async () => {
     try {
+      await instanceActions.loadMaxActiveSettings();
       // Load config if in Tauri mode
       let config = null;
       if (isTauri) {

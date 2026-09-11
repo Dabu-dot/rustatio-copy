@@ -87,6 +87,17 @@ export function createBulkEditState(instances = []) {
     idleWhenNoLeechers: inst.idleWhenNoLeechers,
     idleWhenNoSeeders: inst.idleWhenNoSeeders,
     postStopAction: inst.postStopAction,
+    startWhenLeechersAboveEnabled: inst.startWhenLeechersAboveEnabled,
+    startWhenLeechersAbove: inst.startWhenLeechersAbove,
+    startWhenSeedersAboveEnabled: inst.startWhenSeedersAboveEnabled,
+    startWhenSeedersAbove: inst.startWhenSeedersAbove,
+    cyclicEnabled: inst.cyclicEnabled,
+    minActiveDurationHours: inst.minActiveDurationHours,
+    maxActiveDurationHours: inst.maxActiveDurationHours,
+    minInactiveDurationHours: inst.minInactiveDurationHours,
+    maxInactiveDurationHours: inst.maxInactiveDurationHours,
+    resetSessionCountersOnCycle: inst.resetSessionCountersOnCycle,
+    inactiveMode: inst.inactiveMode,
   }));
 
   const sections = {
@@ -207,7 +218,18 @@ export function applyPresetToBulkState(state, preset) {
     settings.stopAtSeedTimeHours != null ||
     settings.idleWhenNoLeechers != null ||
     settings.idleWhenNoSeeders != null ||
-    settings.postStopAction != null
+    settings.postStopAction != null ||
+    settings.startWhenLeechersAboveEnabled != null ||
+    settings.startWhenLeechersAbove != null ||
+    settings.startWhenSeedersAboveEnabled != null ||
+    settings.startWhenSeedersAbove != null ||
+    settings.cyclicEnabled != null ||
+    settings.minActiveDurationHours != null ||
+    settings.maxActiveDurationHours != null ||
+    settings.minInactiveDurationHours != null ||
+    settings.maxInactiveDurationHours != null ||
+    settings.resetSessionCountersOnCycle != null ||
+    settings.inactiveMode != null
   ) {
     next.sections.stopConditions.apply = true;
     next.sections.stopConditions.value = {
@@ -249,6 +271,35 @@ export function applyPresetToBulkState(state, preset) {
         ? { idleWhenNoSeeders: settings.idleWhenNoSeeders }
         : {}),
       ...(settings.postStopAction != null ? { postStopAction: settings.postStopAction } : {}),
+      ...(settings.startWhenLeechersAboveEnabled != null
+        ? { startWhenLeechersAboveEnabled: settings.startWhenLeechersAboveEnabled }
+        : {}),
+      ...(settings.startWhenLeechersAbove != null
+        ? { startWhenLeechersAbove: settings.startWhenLeechersAbove }
+        : {}),
+      ...(settings.startWhenSeedersAboveEnabled != null
+        ? { startWhenSeedersAboveEnabled: settings.startWhenSeedersAboveEnabled }
+        : {}),
+      ...(settings.startWhenSeedersAbove != null
+        ? { startWhenSeedersAbove: settings.startWhenSeedersAbove }
+        : {}),
+      ...(settings.cyclicEnabled != null ? { cyclicEnabled: settings.cyclicEnabled } : {}),
+      ...(settings.minActiveDurationHours != null
+        ? { minActiveDurationHours: settings.minActiveDurationHours }
+        : {}),
+      ...(settings.maxActiveDurationHours != null
+        ? { maxActiveDurationHours: settings.maxActiveDurationHours }
+        : {}),
+      ...(settings.minInactiveDurationHours != null
+        ? { minInactiveDurationHours: settings.minInactiveDurationHours }
+        : {}),
+      ...(settings.maxInactiveDurationHours != null
+        ? { maxInactiveDurationHours: settings.maxInactiveDurationHours }
+        : {}),
+      ...(settings.resetSessionCountersOnCycle != null
+        ? { resetSessionCountersOnCycle: settings.resetSessionCountersOnCycle }
+        : {}),
+      ...(settings.inactiveMode != null ? { inactiveMode: settings.inactiveMode } : {}),
     };
   }
 

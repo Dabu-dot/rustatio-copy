@@ -46,6 +46,7 @@ pub struct AppState {
     pub watch: Arc<RwLock<Option<crate::watch::DesktopWatchService>>>,
     pub default_config: Arc<RwLock<Option<FakerConfig>>>,
     pub watch_settings: Arc<RwLock<Option<WatchSettings>>>,
+    pub max_active_settings: Arc<RwLock<Option<rustatio_core::MaxActiveSettings>>>,
     pub should_exit: Arc<AtomicBool>,
     pub close_prompt_open: Arc<AtomicBool>,
     pub peer_listener: Arc<RwLock<Option<PeerListenerHandle>>>,
@@ -145,12 +146,14 @@ impl AppState {
 
         let default_config = self.default_config.read().await.clone();
         let watch_settings = self.watch_settings.read().await.clone();
+        let max_active_settings = self.max_active_settings.read().await.clone();
 
         PersistedState {
             instances,
             next_instance_id: next_id,
             default_config,
             watch_settings,
+            max_active_settings,
             version: 1,
         }
     }
@@ -187,12 +190,14 @@ impl AppState {
 
         let default_config = self.default_config.blocking_read().clone();
         let watch_settings = self.watch_settings.blocking_read().clone();
+        let max_active_settings = self.max_active_settings.blocking_read().clone();
 
         PersistedState {
             instances,
             next_instance_id: next_id,
             default_config,
             watch_settings,
+            max_active_settings,
             version: 1,
         }
     }
