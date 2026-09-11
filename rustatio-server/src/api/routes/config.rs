@@ -1,5 +1,6 @@
 //! Default configuration endpoints.
 
+use crate::services::scheduler::roll_and_apply_max_active_limits;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -7,7 +8,6 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
-use crate::services::scheduler::roll_and_apply_max_active_limits;
 use rustatio_core::{FakerConfig, PresetSettings};
 
 use crate::api::{

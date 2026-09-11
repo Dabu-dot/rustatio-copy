@@ -242,13 +242,17 @@ impl From<PresetSettings> for FakerConfig {
             None
         };
 
-        let start_when_leechers_above = if p.start_when_leechers_above_enabled.unwrap_or(false) || p.min_leechers_enabled.unwrap_or(false) {
+        let start_when_leechers_above = if p.start_when_leechers_above_enabled.unwrap_or(false)
+            || p.min_leechers_enabled.unwrap_or(false)
+        {
             p.start_when_leechers_above.or(p.min_leechers)
         } else {
             None
         };
 
-        let start_when_seeders_above = if p.start_when_seeders_above_enabled.unwrap_or(false) || p.min_seeders_enabled.unwrap_or(false) {
+        let start_when_seeders_above = if p.start_when_seeders_above_enabled.unwrap_or(false)
+            || p.min_seeders_enabled.unwrap_or(false)
+        {
             p.start_when_seeders_above.or(p.min_seeders)
         } else {
             None

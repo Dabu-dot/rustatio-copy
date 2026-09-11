@@ -179,7 +179,10 @@ async fn update_instances(
 
     for (id, faker) in active_items {
         if !faker.check_scrape_start_conditions().await {
-            tracing::info!("Instance {} lost scrape conditions during update, transitioning to Idle", id);
+            tracing::info!(
+                "Instance {} lost scrape conditions during update, transitioning to Idle",
+                id
+            );
             let _ = faker.stop().await; // Sends Stopped announce to tracker
             let mut new_stats = faker.stats_snapshot();
             new_stats.state = FakerState::Idle;
@@ -273,7 +276,8 @@ async fn manage_max_active_and_queue(
     let effective_last_timestamp = settings.last_randomized_at.or(settings.last_scrape_timestamp);
     let needs_randomization = effective_last_timestamp.map_or(true, |last| {
         now_secs.saturating_sub(last) >= 86400
-            || (settings.global_max_active_enabled && settings.current_effective_global_limit.is_none())
+            || (settings.global_max_active_enabled
+                && settings.current_effective_global_limit.is_none())
     });
 
     if needs_randomization {
@@ -324,7 +328,9 @@ async fn manage_max_active_and_queue(
     // "Active" instances count includes Running, Starting, and Cyclic Inactive (unless lost scrape conditions).
     let mut tracker_running_map: HashMap<String, Vec<&InstanceStateInfo>> = HashMap::new();
     for item in &instance_states {
-        if matches!(item.state, FakerState::Running | FakerState::Starting) || item.is_cyclic_inactive {
+        if matches!(item.state, FakerState::Running | FakerState::Starting)
+            || item.is_cyclic_inactive
+        {
             tracker_running_map.entry(item.tracker_host.clone()).or_default().push(item);
         }
     }
@@ -345,11 +351,8 @@ async fn manage_max_active_and_queue(
 
     // 1. Reconciliation: Scale Down (Stop excess running instances per-tracker)
     for host in &all_trackers {
-        let tracker_limit = settings
-            .current_effective_tracker_limits
-            .get(host)
-            .copied()
-            .or(default_limit);
+        let tracker_limit =
+            settings.current_effective_tracker_limits.get(host).copied().or(default_limit);
 
         let Some(limit) = tracker_limit else {
             continue;
@@ -402,19 +405,21 @@ async fn manage_max_active_and_queue(
     let mut candidates_by_tracker: HashMap<String, Vec<&InstanceStateInfo>> = HashMap::new();
 
     for item in &updated_states {
-        if matches!(item.state, FakerState::Running | FakerState::Starting) || item.is_cyclic_inactive {
+        if matches!(item.state, FakerState::Running | FakerState::Starting)
+            || item.is_cyclic_inactive
+        {
             *running_count_by_tracker.entry(item.tracker_host.clone()).or_default() += 1;
-        } else if matches!(item.state, FakerState::Stopped | FakerState::Idle) && !item.is_paused && !item.manually_stopped {
+        } else if matches!(item.state, FakerState::Stopped | FakerState::Idle)
+            && !item.is_paused
+            && !item.manually_stopped
+        {
             candidates_by_tracker.entry(item.tracker_host.clone()).or_default().push(item);
         }
     }
 
     for (host, candidates) in candidates_by_tracker.iter_mut() {
-        let tracker_limit = settings
-            .current_effective_tracker_limits
-            .get(host)
-            .copied()
-            .or(default_limit);
+        let tracker_limit =
+            settings.current_effective_tracker_limits.get(host).copied().or(default_limit);
 
         let Some(limit) = tracker_limit else {
             continue;
@@ -432,7 +437,11 @@ async fn manage_max_active_and_queue(
 
             // Scrape Conditions Check (Eligibility Filter)
             if candidate.faker.check_scrape_start_conditions().await {
-                tracing::info!("Queue scheduler: Starting eligible candidate {} for tracker {}", candidate.id, host);
+                tracing::info!(
+                    "Queue scheduler: Starting eligible candidate {} for tracker {}",
+                    candidate.id,
+                    host
+                );
                 if state.start_instance(&candidate.id).await.is_ok() {
                     current_running += 1;
                     running_count_by_tracker.insert(host.clone(), current_running);
