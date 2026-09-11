@@ -1,8 +1,8 @@
 pub mod config;
 pub mod faker;
-pub mod max_active;
 pub mod grid;
 pub mod logger;
+pub mod max_active;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod peer_listener;
 pub mod protocol;
@@ -11,13 +11,13 @@ pub mod validation;
 
 // Re-export main types explicitly to avoid ambiguous Result types
 pub use config::{AppConfig, ClientSettings, ConfigError, FakerSettings, UiSettings};
-pub use max_active::{MaxActiveSettings, TrackerMaxActiveSetting};
 #[cfg(not(target_arch = "wasm32"))]
 pub use faker::RatioFakerHandle;
 pub use faker::{
     FakerConfig, FakerError, FakerState, FakerStats, PostStopAction, PresetSettings, RatioFaker,
 };
 pub use grid::{primary_tracker_host, GridImportSettings, GridMode, InstanceSummary};
+pub use max_active::{MaxActiveSettings, TrackerMaxActiveSetting};
 #[cfg(not(target_arch = "wasm32"))]
 pub use peer_listener::{PeerCatalog, PeerListenerService, PeerListenerStatus, PeerLookup};
 pub use torrent::{
