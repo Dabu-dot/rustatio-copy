@@ -65,6 +65,10 @@ pub struct PersistedRuntime {
     #[serde(default)]
     pub tracker_error: Option<String>,
     pub announce_count: u32,
+    #[serde(default)]
+    pub is_cyclic_inactive: bool,
+    #[serde(default)]
+    pub cyclic_next_switch_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

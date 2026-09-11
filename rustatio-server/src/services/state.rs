@@ -1100,6 +1100,8 @@ impl AppState {
             idling_reason: stats.idling_reason.clone(),
             tracker_error: stats.tracker_error.clone(),
             announce_count: stats.announce_count,
+            is_cyclic_inactive: stats.is_cyclic_inactive,
+            cyclic_next_switch_ms: stats.cyclic_next_switch_ms,
         }
     }
 
@@ -1148,8 +1150,8 @@ impl AppState {
             announce_count: runtime.announce_count,
             stop_condition_met: runtime.stop_condition_met,
             post_stop_action,
-            is_cyclic_inactive: false,
-            cyclic_next_switch_ms: None,
+            is_cyclic_inactive: runtime.is_cyclic_inactive,
+            cyclic_next_switch_ms: runtime.cyclic_next_switch_ms,
         }
     }
 }
