@@ -30,6 +30,8 @@ pub struct PersistedState {
     pub default_config: Option<FakerConfig>,
     #[serde(default)]
     pub watch_settings: Option<WatchSettings>,
+    #[serde(default)]
+    pub max_active_settings: Option<rustatio_core::MaxActiveSettings>,
     pub version: u32,
 }
 
@@ -40,6 +42,7 @@ impl PersistedState {
             next_instance_id: 1,
             default_config: None,
             watch_settings: None,
+            max_active_settings: None,
             version: 1,
         }
     }

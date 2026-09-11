@@ -53,3 +53,20 @@ pub async fn write_file(path: String, contents: String) -> Result<(), String> {
     log::info!("File written to: {path}");
     Ok(())
 }
+
+#[tauri::command]
+pub async fn get_max_active_settings(
+    state: State<'_, AppState>,
+) -> Result<rustatio_core::MaxActiveSettings, String> {
+    let settings = state.max_active_settings.read().await.clone().unwrap_or_default();
+    Ok(settings)
+}
+
+#[tauri::command]
+pub async fn set_max_active_settings(
+    settings: rustatio_core::MaxActiveSettings,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    *state.max_active_settings.write().await = Some(settings);
+    state.save_state().await
+}

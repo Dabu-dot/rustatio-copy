@@ -86,7 +86,7 @@
 
   async function loadMaxActiveSettings() {
     try {
-      const res = await api.getMaxActiveSettings();
+      const res = await instanceActions.loadMaxActiveSettings();
       if (res) {
         maxActiveSettings = {
           global_max_active_enabled: res.global_max_active_enabled ?? false,
@@ -105,7 +105,7 @@
 
   async function saveMaxActiveSettings() {
     try {
-      await api.setMaxActiveSettings(maxActiveSettings);
+      await instanceActions.saveMaxActiveSettings(maxActiveSettings);
     } catch (e) {
       console.error('Failed to save max active settings:', e);
     }

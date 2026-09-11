@@ -216,6 +216,7 @@ async fn manage_max_active_and_queue(
         state: FakerState,
         tracker_host: String,
         is_paused: bool,
+        elapsed_secs: u64,
     }
 
     let instance_states: Vec<InstanceStateInfo> = {
@@ -231,6 +232,84 @@ async fn manage_max_active_and_queue(
                     state: stats.state,
                     tracker_host,
                     is_paused,
+                    elapsed_secs: stats.elapsed_time.as_secs(),
+                }
+            })
+            .collect()
+    };
+
+    // 1. Reconciliation: Stop excess running instances per-tracker
+    let mut stopped_ids = Vec::new();
+    for (host, &limit) in &settings.current_effective_tracker_limits {
+        let mut running_on_tracker: Vec<&InstanceStateInfo> = instance_states
+            .iter()
+            .filter(|item| {
+                item.tracker_host == *host
+                    && matches!(item.state, FakerState::Running | FakerState::Starting)
+                    && !stopped_ids.contains(&item.id)
+            })
+            .collect();
+
+        if running_on_tracker.len() > limit as usize {
+            // Sort by elapsed_secs ascending (lowest elapsed = most recently started = stopped first)
+            running_on_tracker.sort_by_key(|item| item.elapsed_secs);
+            let excess = running_on_tracker.len() - limit as usize;
+            for item in running_on_tracker.iter().take(excess) {
+                tracing::info!(
+                    "Queue scheduler: Tracker limit ({}) exceeded for {}. Stopping excess instance {}",
+                    limit,
+                    host,
+                    item.id
+                );
+                let _ = state.stop_instance(&item.id).await;
+                stopped_ids.push(item.id.clone());
+                settings_modified = true;
+            }
+        }
+    }
+
+    // 2. Reconciliation: Stop excess running instances globally
+    if let Some(global_limit) = settings.current_effective_global_limit {
+        let mut running_global: Vec<&InstanceStateInfo> = instance_states
+            .iter()
+            .filter(|item| {
+                matches!(item.state, FakerState::Running | FakerState::Starting)
+                    && !stopped_ids.contains(&item.id)
+            })
+            .collect();
+
+        if running_global.len() > global_limit as usize {
+            // Sort by elapsed_secs ascending (lowest elapsed = most recently started = stopped first)
+            running_global.sort_by_key(|item| item.elapsed_secs);
+            let excess = running_global.len() - global_limit as usize;
+            for item in running_global.iter().take(excess) {
+                tracing::info!(
+                    "Queue scheduler: Global limit ({}) exceeded. Stopping excess instance {}",
+                    global_limit,
+                    item.id
+                );
+                let _ = state.stop_instance(&item.id).await;
+                stopped_ids.push(item.id.clone());
+                settings_modified = true;
+            }
+        }
+    }
+
+    // Re-evaluate running counts after reconciliation
+    let updated_states: Vec<InstanceStateInfo> = {
+        let guard = instances.read().await;
+        guard
+            .iter()
+            .map(|(id, inst)| {
+                let stats = inst.faker.stats_snapshot();
+                let tracker_host = primary_tracker_host(&inst.summary.announce).unwrap_or_default();
+                let is_paused = matches!(stats.state, FakerState::Paused);
+                InstanceStateInfo {
+                    id: id.clone(),
+                    state: stats.state,
+                    tracker_host,
+                    is_paused,
+                    elapsed_secs: stats.elapsed_time.as_secs(),
                 }
             })
             .collect()
@@ -240,12 +319,11 @@ async fn manage_max_active_and_queue(
     let mut total_running = 0u32;
     let mut candidates_to_start = Vec::new();
 
-    for item in &instance_states {
+    for item in &updated_states {
         if matches!(item.state, FakerState::Running | FakerState::Starting) {
             total_running += 1;
             *running_by_tracker.entry(item.tracker_host.clone()).or_default() += 1;
         } else if matches!(item.state, FakerState::Stopped | FakerState::Idle) && !item.is_paused {
-            // Eligible to be started if room allows
             candidates_to_start.push(item);
         }
     }
@@ -358,5 +436,119 @@ mod tests {
             .await
             .and_then(|s| s.current_effective_global_limit);
         assert_eq!(effective_limit, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_reconciliation_stops_excess_running_instances_most_recent_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        state
+            .create_instance("inst-1", sample_torrent(1), FakerConfig::default())
+            .await
+            .unwrap();
+        state
+            .create_instance("inst-2", sample_torrent(2), FakerConfig::default())
+            .await
+            .unwrap();
+        state
+            .create_instance("inst-3", sample_torrent(3), FakerConfig::default())
+            .await
+            .unwrap();
+
+        // Set all 3 to Running with different elapsed times:
+        // inst-1 = 100s (longest), inst-2 = 50s, inst-3 = 10s (most recent)
+        {
+            let instances = state.instances.read().await;
+            for (id, elapsed) in [("inst-1", 100), ("inst-2", 50), ("inst-3", 10)] {
+                let inst = instances.get(id).unwrap();
+                let mut stats = inst.faker.stats_snapshot();
+                stats.state = FakerState::Running;
+                stats.elapsed_time = Duration::from_secs(elapsed);
+                inst.faker.restore_snapshot(stats).await;
+            }
+        }
+
+        // Set limit to 1 active
+        let mut settings = MaxActiveSettings::default();
+        settings.global_max_active_enabled = true;
+        settings.global_min_active = Some(1);
+        settings.global_max_active = Some(1);
+        state.set_max_active_settings(settings).await.unwrap();
+
+        let instances_map = state.instances.clone();
+        manage_max_active_and_queue(&state, &instances_map).await;
+
+        // Verify inst-1 (100s elapsed, longest running) is still running
+        // and inst-2 and inst-3 (most recently started) were stopped
+        let inst1_state = state.get_stats("inst-1").await.unwrap().state;
+        let inst2_state = state.get_stats("inst-2").await.unwrap().state;
+        let inst3_state = state.get_stats("inst-3").await.unwrap().state;
+
+        assert!(matches!(inst1_state, FakerState::Running));
+        assert!(matches!(inst2_state, FakerState::Stopped));
+        assert!(matches!(inst3_state, FakerState::Stopped));
+    }
+
+    #[tokio::test]
+    async fn test_start_instance_blocked_when_limit_reached() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = AppState::new(&temp.path().to_string_lossy());
+
+        state
+            .create_instance("inst-1", sample_torrent(1), FakerConfig::default())
+            .await
+            .unwrap();
+        state
+            .create_instance("inst-2", sample_torrent(2), FakerConfig::default())
+            .await
+            .unwrap();
+
+        // Set limit to 1 active
+        let mut settings = MaxActiveSettings::default();
+        settings.global_max_active_enabled = true;
+        settings.global_min_active = Some(1);
+        settings.global_max_active = Some(1);
+        state.set_max_active_settings(settings).await.unwrap();
+
+        // Set inst-1 to Running
+        {
+            let instances = state.instances.read().await;
+            let inst1 = instances.get("inst-1").unwrap();
+            let mut stats = inst1.faker.stats_snapshot();
+            stats.state = FakerState::Running;
+            inst1.faker.restore_snapshot(stats).await;
+        }
+
+        // Start inst-2 should be blocked
+        let err = state.start_instance("inst-2").await;
+        assert!(err.is_err());
+        let err_msg = err.unwrap_err();
+        assert!(err_msg.contains("Maximum active instances limit"));
+    }
+
+    #[tokio::test]
+    async fn test_max_active_settings_persistence() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+
+        let state = AppState::new(&path);
+
+        let mut settings = MaxActiveSettings::default();
+        settings.global_max_active_enabled = true;
+        settings.global_min_active = Some(2);
+        settings.global_max_active = Some(4);
+        state.set_max_active_settings(settings.clone()).await.unwrap();
+
+        // Load new AppState from same directory
+        let restored_state = AppState::new(&path);
+        restored_state.load_saved_state().await.unwrap();
+
+        let loaded = restored_state.get_max_active_settings().await;
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert!(loaded.global_max_active_enabled);
+        assert_eq!(loaded.global_min_active, Some(2));
+        assert_eq!(loaded.global_max_active, Some(4));
     }
 }

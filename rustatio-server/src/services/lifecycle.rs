@@ -35,16 +35,65 @@ impl InstanceLifecycle for AppState {
         };
         set_instance_context_str(Some(&label));
 
-        let (faker, restore) = {
+        let (faker, restore, is_already_active, tracker_host) = {
             let instances = self.instances.read().await;
             let instance = instances.get(id).ok_or("Instance not found")?;
             let stats = instance.faker.stats_snapshot();
-            let restore = matches!(
+            let is_already_active = matches!(
                 stats.state,
                 rustatio_core::FakerState::Running | rustatio_core::FakerState::Starting
-            ) && stats.elapsed_time.as_secs() > 0;
-            (Arc::clone(&instance.faker), restore)
+            );
+            let restore = is_already_active && stats.elapsed_time.as_secs() > 0;
+            let tracker_host = rustatio_core::primary_tracker_host(&instance.summary.announce).unwrap_or_default();
+            (Arc::clone(&instance.faker), restore, is_already_active, tracker_host)
         };
+
+        if !is_already_active {
+            if let Some(settings) = self.get_max_active_settings().await {
+                let instances = self.instances.read().await;
+                let mut current_total_running = 0u32;
+                let mut current_tracker_running = 0u32;
+
+                for inst in instances.values() {
+                    let st = inst.faker.stats_snapshot().state;
+                    if matches!(st, rustatio_core::FakerState::Running | rustatio_core::FakerState::Starting) {
+                        current_total_running += 1;
+                        let host = rustatio_core::primary_tracker_host(&inst.summary.announce).unwrap_or_default();
+                        if host == tracker_host {
+                            current_tracker_running += 1;
+                        }
+                    }
+                }
+
+                if settings.global_max_active_enabled {
+                    let global_limit = settings
+                        .current_effective_global_limit
+                        .or(settings.global_max_active);
+                    if let Some(limit) = global_limit {
+                        if current_total_running >= limit {
+                            return Err(format!(
+                                "Maximum active instances limit ({limit}) reached"
+                            ));
+                        }
+                    }
+                }
+
+                if let Some(tr_setting) = settings.tracker_max_active.get(&tracker_host) {
+                    if tr_setting.enabled {
+                        let tr_limit = settings
+                            .current_effective_tracker_limits
+                            .get(&tracker_host)
+                            .copied()
+                            .unwrap_or(tr_setting.max_active);
+                        if current_tracker_running >= tr_limit {
+                            return Err(format!(
+                                "Maximum active instances limit for tracker '{tracker_host}' ({tr_limit}) reached"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
 
         if restore {
             faker.restore_running().await.map_err(|e| e.to_string())?;
