@@ -1,6 +1,6 @@
 use super::instance::FakerInstance;
 use super::lifecycle::InstanceLifecycle;
-use super::persistence::now_timestamp;
+use super::persistence::{now_timestamp, MaxActiveSettings};
 use super::state::AppState;
 use rand::Rng;
 use rustatio_core::logger::set_instance_context_str;
@@ -158,6 +158,51 @@ async fn update_instances(
     dirty
 }
 
+pub async fn roll_and_apply_max_active(state: &AppState) -> Result<MaxActiveSettings, String> {
+    let mut settings = state.get_max_active_settings().await.unwrap_or_default();
+    let now_secs = now_timestamp();
+
+    {
+        let mut rng = rand::rng();
+
+        if settings.global_max_active_enabled {
+            if let (Some(min_val), Some(max_val)) = (settings.global_min_active, settings.global_max_active) {
+                let limit = if min_val < max_val {
+                    rng.random_range(min_val..=max_val)
+                } else {
+                    min_val
+                };
+                settings.current_effective_global_limit = Some(limit);
+            } else {
+                settings.current_effective_global_limit = None;
+            }
+        } else {
+            settings.current_effective_global_limit = None;
+        }
+
+        settings.current_effective_tracker_limits.clear();
+        for (host, tr_setting) in &settings.tracker_max_active {
+            if tr_setting.enabled {
+                let limit = if tr_setting.min_active < tr_setting.max_active {
+                    rng.random_range(tr_setting.min_active..=tr_setting.max_active)
+                } else {
+                    tr_setting.min_active
+                };
+                settings.current_effective_tracker_limits.insert(host.clone(), limit);
+            }
+        }
+    }
+
+    settings.last_rotation_timestamp = Some(now_secs);
+
+    state.set_max_active_settings(settings.clone()).await?;
+
+    // Instantly trigger reconciliation
+    reconcile_active_instances(state, &state.instances, &settings).await;
+
+    Ok(settings)
+}
+
 async fn manage_max_active_and_queue(
     state: &AppState,
     instances: &Arc<RwLock<HashMap<String, FakerInstance>>>,
@@ -169,12 +214,12 @@ async fn manage_max_active_and_queue(
     let now_secs = now_timestamp();
     let mut settings_modified = false;
 
-    // Check if daily re-randomization is needed (every 86400 seconds)
-    let needs_randomization = settings.last_randomized_at.map_or(true, |last| {
-        now_secs.saturating_sub(last) >= 86400 || settings.current_effective_global_limit.is_none()
+    // Check if 24h rotation is needed (86400 seconds)
+    let needs_rotation = settings.last_rotation_timestamp.map_or(true, |last| {
+        now_secs.saturating_sub(last) >= 86400 || (settings.global_max_active_enabled && settings.current_effective_global_limit.is_none())
     });
 
-    if needs_randomization {
+    if needs_rotation {
         let mut rng = rand::rng();
 
         if settings.global_max_active_enabled {
@@ -202,7 +247,7 @@ async fn manage_max_active_and_queue(
             }
         }
 
-        settings.last_randomized_at = Some(now_secs);
+        settings.last_rotation_timestamp = Some(now_secs);
         settings_modified = true;
     }
 
@@ -210,76 +255,153 @@ async fn manage_max_active_and_queue(
         let _ = state.set_max_active_settings(settings.clone()).await;
     }
 
-    // Inspect running vs queued instances
+    let reconciled = reconcile_active_instances(state, instances, &settings).await;
+
+    settings_modified || reconciled
+}
+
+async fn reconcile_active_instances(
+    state: &AppState,
+    instances: &Arc<RwLock<HashMap<String, FakerInstance>>>,
+    settings: &MaxActiveSettings,
+) -> bool {
     struct InstanceStateInfo {
         id: String,
         state: FakerState,
         tracker_host: String,
         is_paused: bool,
+        elapsed_secs: u64,
+        is_eligible_to_start: bool,
     }
 
-    let instance_states: Vec<InstanceStateInfo> = {
+    let handles: Vec<(String, Arc<RatioFakerHandle>, String)> = {
         let guard = instances.read().await;
         guard
             .iter()
             .map(|(id, inst)| {
-                let stats = inst.faker.stats_snapshot();
                 let tracker_host = primary_tracker_host(&inst.summary.announce).unwrap_or_default();
-                let is_paused = matches!(stats.state, FakerState::Paused);
-                InstanceStateInfo {
-                    id: id.clone(),
-                    state: stats.state,
-                    tracker_host,
-                    is_paused,
-                }
+                (id.clone(), Arc::clone(&inst.faker), tracker_host)
             })
             .collect()
     };
 
-    let mut running_by_tracker: HashMap<String, u32> = HashMap::new();
-    let mut total_running = 0u32;
-    let mut candidates_to_start = Vec::new();
+    let mut instance_states = Vec::with_capacity(handles.len());
+    for (id, faker, tracker_host) in handles {
+        let stats = faker.stats_snapshot();
+        let is_paused = matches!(stats.state, FakerState::Paused);
+        let is_eligible_to_start = faker.is_eligible_to_start().await;
+        instance_states.push(InstanceStateInfo {
+            id,
+            state: stats.state,
+            tracker_host,
+            is_paused,
+            elapsed_secs: stats.elapsed_time.as_secs(),
+            is_eligible_to_start,
+        });
+    }
+
+    let mut running_by_tracker: HashMap<String, Vec<&InstanceStateInfo>> = HashMap::new();
+    let mut total_running: Vec<&InstanceStateInfo> = Vec::new();
+    let mut candidates_to_start: Vec<&InstanceStateInfo> = Vec::new();
 
     for item in &instance_states {
         if matches!(item.state, FakerState::Running | FakerState::Starting) {
-            total_running += 1;
-            *running_by_tracker.entry(item.tracker_host.clone()).or_default() += 1;
+            total_running.push(item);
+            running_by_tracker.entry(item.tracker_host.clone()).or_default().push(item);
         } else if matches!(item.state, FakerState::Stopped | FakerState::Idle) && !item.is_paused {
-            // Eligible to be started if room allows
             candidates_to_start.push(item);
         }
     }
 
-    if candidates_to_start.is_empty() {
-        return settings_modified;
-    }
+    let mut action_taken = false;
 
-    // Check global limit constraint
+    // --- SCALE DOWN (Too many active instances) ---
+    // Sort running instances by elapsed_secs ascending so most recently started instances are stopped first.
+    // 1. Global limit scale down
     if let Some(global_limit) = settings.current_effective_global_limit {
-        if total_running >= global_limit {
-            return settings_modified;
+        let global_limit = global_limit as usize;
+        if total_running.len() > global_limit {
+            let mut active_list = total_running.clone();
+            active_list.sort_by_key(|inst| inst.elapsed_secs);
+            let excess = active_list.len() - global_limit;
+            for inst in active_list.iter().take(excess) {
+                tracing::info!(
+                    "Reconciliation Engine (Scale Down): Stopping excess instance {} (elapsed: {}s)",
+                    inst.id,
+                    inst.elapsed_secs
+                );
+                if let Err(e) = state.stop_instance(&inst.id).await {
+                    tracing::warn!("Reconciliation Engine: Failed to stop excess instance {}: {}", inst.id, e);
+                } else {
+                    action_taken = true;
+                }
+            }
         }
     }
 
-    // Filter candidates that fit under their tracker's limit
-    let eligible_candidates: Vec<&InstanceStateInfo> = candidates_to_start
-        .into_iter()
+    // 2. Tracker limit scale down
+    for (host, tr_limit) in &settings.current_effective_tracker_limits {
+        if let Some(running_list) = running_by_tracker.get_mut(host) {
+            let limit = *tr_limit as usize;
+            if running_list.len() > limit {
+                running_list.sort_by_key(|inst| inst.elapsed_secs);
+                let excess = running_list.len() - limit;
+                for inst in running_list.iter().take(excess) {
+                    tracing::info!(
+                        "Reconciliation Engine (Tracker Scale Down): Stopping excess instance {} for host {} (elapsed: {}s)",
+                        inst.id,
+                        host,
+                        inst.elapsed_secs
+                    );
+                    if let Err(e) = state.stop_instance(&inst.id).await {
+                        tracing::warn!("Reconciliation Engine: Failed to stop tracker excess instance {}: {}", inst.id, e);
+                    } else {
+                        action_taken = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if action_taken {
+        return true;
+    }
+
+    // --- SCALE UP (Too few active instances) ---
+    // Check if global limit allows starting instances
+    if let Some(global_limit) = settings.current_effective_global_limit {
+        let current_running_count = total_running.len() as u32;
+        if current_running_count >= global_limit {
+            return action_taken;
+        }
+    }
+
+    // Filter candidates that fit under tracker limits and satisfy start conditions if specified
+    let current_tracker_counts: HashMap<String, u32> = running_by_tracker
+        .iter()
+        .map(|(host, list)| (host.clone(), list.len() as u32))
+        .collect();
+
+    let eligible_candidates: Vec<&&InstanceStateInfo> = candidates_to_start
+        .iter()
         .filter(|item| {
+            // Respect tracker limits
             if let Some(&tr_limit) = settings.current_effective_tracker_limits.get(&item.tracker_host) {
-                let current_tr_running = running_by_tracker.get(&item.tracker_host).copied().unwrap_or(0);
-                if current_tr_running >= tr_limit {
+                let current_count = current_tracker_counts.get(&item.tracker_host).copied().unwrap_or(0);
+                if current_count >= tr_limit {
                     return false;
                 }
             }
-            true
+            // Respect start conditions: if instance has scrape start conditions configured, check if satisfied
+            item.is_eligible_to_start
         })
         .collect();
 
     if eligible_candidates.is_empty() {
-        return settings_modified;
+        return action_taken;
     }
 
-    // Randomly select one eligible candidate to start
+    // Randomly select one eligible candidate to scale up
     let selected_id = {
         let mut rng = rand::rng();
         let idx = rng.random_range(0..eligible_candidates.len());
@@ -287,17 +409,17 @@ async fn manage_max_active_and_queue(
     };
 
     tracing::info!(
-        "Queue scheduler: Starting next queued instance {}",
+        "Reconciliation Engine (Scale Up): Starting eligible queued instance {}",
         selected_id
     );
 
     if let Err(e) = state.start_instance(&selected_id).await {
-        tracing::warn!("Queue scheduler: Failed to start instance {}: {}", selected_id, e);
+        tracing::warn!("Reconciliation Engine: Failed to start queued instance {}: {}", selected_id, e);
     } else {
-        settings_modified = true;
+        action_taken = true;
     }
 
-    settings_modified
+    action_taken
 }
 
 #[cfg(test)]

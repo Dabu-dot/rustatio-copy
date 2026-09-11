@@ -1728,6 +1728,11 @@ impl RatioFaker {
     }
 
     /// Get current timestamp in milliseconds (cross-platform)
+    pub fn has_scrape_start_conditions(&self) -> bool {
+        self.config.start_when_leechers_above.is_some()
+            || self.config.start_when_seeders_above.is_some()
+    }
+
     pub fn check_scrape_start_conditions(&self) -> bool {
         let leechers_condition = self
             .config
@@ -1740,6 +1745,14 @@ impl RatioFaker {
             .is_some_and(|threshold| self.stats.seeders > threshold);
 
         leechers_condition || seeders_condition
+    }
+
+    pub fn is_eligible_to_start(&self) -> bool {
+        if !self.has_scrape_start_conditions() {
+            true
+        } else {
+            self.check_scrape_start_conditions()
+        }
     }
 
     pub fn reset_session_counters(&mut self) {
@@ -2210,6 +2223,21 @@ impl RatioFakerHandle {
         let result = guard.update_config(config, http_client);
         let _ = self.stats_tx.send(guard.stats_snapshot());
         result
+    }
+
+    pub async fn has_scrape_start_conditions(&self) -> bool {
+        let guard = self.inner.lock().await;
+        guard.has_scrape_start_conditions()
+    }
+
+    pub async fn check_scrape_start_conditions(&self) -> bool {
+        let guard = self.inner.lock().await;
+        guard.check_scrape_start_conditions()
+    }
+
+    pub async fn is_eligible_to_start(&self) -> bool {
+        let guard = self.inner.lock().await;
+        guard.is_eligible_to_start()
     }
 
     pub async fn can_retry_tracker(&self) -> bool {

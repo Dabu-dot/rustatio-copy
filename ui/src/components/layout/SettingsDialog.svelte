@@ -83,6 +83,7 @@
   let newTrackerHost = $state('');
   let newTrackerMin = $state(2);
   let newTrackerMax = $state(4);
+  let isRolling = $state(false);
 
   async function loadMaxActiveSettings() {
     try {
@@ -93,7 +94,7 @@
           global_min_active: res.global_min_active ?? 3,
           global_max_active: res.global_max_active ?? 5,
           tracker_max_active: res.tracker_max_active ?? {},
-          last_randomized_at: res.last_randomized_at,
+          last_rotation_timestamp: res.last_rotation_timestamp ?? res.last_randomized_at,
           current_effective_global_limit: res.current_effective_global_limit,
           current_effective_tracker_limits: res.current_effective_tracker_limits ?? {},
         };
@@ -108,6 +109,26 @@
       await api.setMaxActiveSettings(maxActiveSettings);
     } catch (e) {
       console.error('Failed to save max active settings:', e);
+    }
+  }
+
+  async function rollAndApplyNow() {
+    isRolling = true;
+    try {
+      await saveMaxActiveSettings();
+      const res = await api.rollMaxActiveSettings();
+      if (res) {
+        maxActiveSettings = {
+          ...maxActiveSettings,
+          last_rotation_timestamp: res.last_rotation_timestamp ?? res.last_randomized_at,
+          current_effective_global_limit: res.current_effective_global_limit,
+          current_effective_tracker_limits: res.current_effective_tracker_limits ?? {},
+        };
+      }
+    } catch (e) {
+      console.error('Failed to roll active limits:', e);
+    } finally {
+      isRolling = false;
     }
   }
 
@@ -665,6 +686,11 @@
                   </p>
                 {/if}
               {/if}
+              <div class="pt-2 flex justify-end">
+                <Button size="sm" variant="outline" onclick={rollAndApplyNow} disabled={isRolling}>
+                  {isRolling ? 'Rolling...' : 'Roll & Apply Limit Now'}
+                </Button>
+              </div>
             </div>
 
             <!-- Per-Tracker Limits -->

@@ -592,6 +592,9 @@ const serverApi = {
       body: JSON.stringify(settings),
     });
   },
+  rollMaxActiveSettings: async () => {
+    return serverFetch('/config/max-active/roll', { method: 'POST' });
+  },
   getDefaultPreset: async () => {
     return serverFetch('/config/default-preset', { method: 'GET' });
   },
@@ -1005,6 +1008,17 @@ const tauriApi = {
     const { invoke } = await import('@tauri-apps/api/core');
     return invoke('set_max_active_settings', { settings });
   },
+  rollMaxActiveSettings: async () => {
+    const settings = await readJsonStorage('rustatio-max-active', null);
+    if (!settings) return null;
+    const min = settings.global_min_active || 1;
+    const max = settings.global_max_active || min;
+    const limit = Math.floor(Math.random() * (max - min + 1)) + min;
+    settings.current_effective_global_limit = limit;
+    settings.last_rotation_timestamp = Math.floor(Date.now() / 1000);
+    writeJsonStorage('rustatio-max-active', settings);
+    return settings;
+  },
   getDefaultPreset: getLocalDefaultPreset,
   setDefaultPreset: setLocalDefaultPreset,
   clearDefaultPreset: clearLocalDefaultPreset,
@@ -1203,6 +1217,17 @@ const wasmApi = {
   },
   setMaxActiveSettings: async settings => {
     writeJsonStorage('rustatio-max-active', settings);
+  },
+  rollMaxActiveSettings: async () => {
+    const settings = readJsonStorage('rustatio-max-active', null);
+    if (!settings) return null;
+    const min = settings.global_min_active || 1;
+    const max = settings.global_max_active || min;
+    const limit = Math.floor(Math.random() * (max - min + 1)) + min;
+    settings.current_effective_global_limit = limit;
+    settings.last_rotation_timestamp = Math.floor(Date.now() / 1000);
+    writeJsonStorage('rustatio-max-active', settings);
+    return settings;
   },
   getDefaultPreset: getLocalDefaultPreset,
   setDefaultPreset: setLocalDefaultPreset,

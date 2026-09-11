@@ -119,8 +119,8 @@ pub struct MaxActiveSettings {
     pub global_max_active: Option<u32>,
     #[serde(default)]
     pub tracker_max_active: HashMap<String, TrackerMaxActiveSetting>,
-    #[serde(default)]
-    pub last_randomized_at: Option<u64>, // Unix timestamp in seconds
+    #[serde(default, alias = "last_randomized_at")]
+    pub last_rotation_timestamp: Option<u64>, // Unix timestamp in seconds
     #[serde(default)]
     pub current_effective_global_limit: Option<u32>,
     #[serde(default)]
