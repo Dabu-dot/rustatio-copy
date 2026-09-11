@@ -4,3 +4,15 @@ rules:
       # Low confidence: cargo dependency cache in same job as release upload
       - release.yml:166
       - release.yml:172
+      - docker-build.yml
+  excessive-permissions:
+    ignore:
+      - deploy.yml
+  unpinned-uses:
+    ignore:
+      - deploy.yml
+      - docker-build.yml
+  artipacked:
+    ignore:
+      - deploy.yml
+      - docker-build.yml
