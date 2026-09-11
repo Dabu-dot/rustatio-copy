@@ -1,5 +1,6 @@
 pub mod config;
 pub mod faker;
+pub mod max_active;
 pub mod grid;
 pub mod logger;
 #[cfg(not(target_arch = "wasm32"))]
@@ -10,6 +11,7 @@ pub mod validation;
 
 // Re-export main types explicitly to avoid ambiguous Result types
 pub use config::{AppConfig, ClientSettings, ConfigError, FakerSettings, UiSettings};
+pub use max_active::{MaxActiveSettings, TrackerMaxActiveSetting};
 #[cfg(not(target_arch = "wasm32"))]
 pub use faker::RatioFakerHandle;
 pub use faker::{
