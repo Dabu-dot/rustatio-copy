@@ -203,8 +203,12 @@ pub struct PresetSettings {
     // Scrape-based start conditions
     pub start_when_leechers_above_enabled: Option<bool>,
     pub start_when_leechers_above: Option<i64>,
+    pub min_leechers_enabled: Option<bool>,
+    pub min_leechers: Option<i64>,
     pub start_when_seeders_above_enabled: Option<bool>,
     pub start_when_seeders_above: Option<i64>,
+    pub min_seeders_enabled: Option<bool>,
+    pub min_seeders: Option<i64>,
     // Cyclic interval scheduling
     pub cyclic_enabled: Option<bool>,
     pub min_active_duration_hours: Option<f64>,
@@ -238,14 +242,18 @@ impl From<PresetSettings> for FakerConfig {
             None
         };
 
-        let start_when_leechers_above = if p.start_when_leechers_above_enabled.unwrap_or(false) {
-            p.start_when_leechers_above
+        let start_when_leechers_above = if p.start_when_leechers_above_enabled.unwrap_or(false)
+            || p.min_leechers_enabled.unwrap_or(false)
+        {
+            p.start_when_leechers_above.or(p.min_leechers)
         } else {
             None
         };
 
-        let start_when_seeders_above = if p.start_when_seeders_above_enabled.unwrap_or(false) {
-            p.start_when_seeders_above
+        let start_when_seeders_above = if p.start_when_seeders_above_enabled.unwrap_or(false)
+            || p.min_seeders_enabled.unwrap_or(false)
+        {
+            p.start_when_seeders_above.or(p.min_seeders)
         } else {
             None
         };
@@ -464,6 +472,10 @@ pub struct FakerStats {
     pub is_cyclic_inactive: bool,
     #[serde(default)]
     pub cyclic_next_switch_ms: Option<u64>,
+
+    // === MANUAL STOP FLAG ===
+    #[serde(default)]
+    pub manually_stopped: bool,
 
     // === INTERNAL ===
     #[serde(skip)]
@@ -812,6 +824,7 @@ impl RatioFaker {
 
             is_cyclic_inactive,
             cyclic_next_switch_ms,
+            manually_stopped: false,
         };
 
         Ok(Self {
@@ -1511,6 +1524,7 @@ impl RatioFaker {
             post_stop_action: config.post_stop_action,
             is_cyclic_inactive: false,
             cyclic_next_switch_ms: None,
+            manually_stopped: false,
         }
     }
 
@@ -2290,6 +2304,11 @@ impl RatioFakerHandle {
     pub async fn is_peer_connectable(&self) -> bool {
         let guard = self.inner.lock().await;
         handle_is_connectable(guard.stats.state)
+    }
+
+    pub async fn check_scrape_start_conditions(&self) -> bool {
+        let guard = self.inner.lock().await;
+        guard.check_scrape_start_conditions()
     }
 }
 

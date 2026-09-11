@@ -69,6 +69,8 @@ pub struct PersistedRuntime {
     pub is_cyclic_inactive: bool,
     #[serde(default)]
     pub cyclic_next_switch_ms: Option<u64>,
+    #[serde(default)]
+    pub manually_stopped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

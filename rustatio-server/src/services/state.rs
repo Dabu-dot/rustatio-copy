@@ -1102,6 +1102,7 @@ impl AppState {
             announce_count: stats.announce_count,
             is_cyclic_inactive: stats.is_cyclic_inactive,
             cyclic_next_switch_ms: stats.cyclic_next_switch_ms,
+            manually_stopped: stats.manually_stopped,
         }
     }
 
@@ -1152,6 +1153,7 @@ impl AppState {
             post_stop_action,
             is_cyclic_inactive: runtime.is_cyclic_inactive,
             cyclic_next_switch_ms: runtime.cyclic_next_switch_ms,
+            manually_stopped: runtime.manually_stopped,
         }
     }
 }

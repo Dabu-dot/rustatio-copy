@@ -83,6 +83,44 @@
   let newTrackerHost = $state('');
   let newTrackerMin = $state(2);
   let newTrackerMax = $state(4);
+  let rollingLimits = $state(false);
+
+  let isMaxActiveInvalid = $derived.by(() => {
+    if (
+      maxActiveSettings.global_max_active_enabled &&
+      Number(maxActiveSettings.global_min_active) > Number(maxActiveSettings.global_max_active)
+    ) {
+      return true;
+    }
+    for (const rule of Object.values(maxActiveSettings.tracker_max_active || {})) {
+      if (rule.enabled && Number(rule.min_active) > Number(rule.max_active)) {
+        return true;
+      }
+    }
+    return false;
+  });
+
+  async function rollMaxActiveLimitsNow() {
+    rollingLimits = true;
+    try {
+      const res = await api.serverFetch('/config/max-active/roll', { method: 'POST' });
+      if (res) {
+        maxActiveSettings = {
+          global_max_active_enabled: res.global_max_active_enabled ?? false,
+          global_min_active: res.global_min_active ?? 3,
+          global_max_active: res.global_max_active ?? 5,
+          tracker_max_active: res.tracker_max_active ?? {},
+          last_randomized_at: res.last_randomized_at,
+          current_effective_global_limit: res.current_effective_global_limit,
+          current_effective_tracker_limits: res.current_effective_tracker_limits ?? {},
+        };
+      }
+    } catch (e) {
+      console.error('Failed to roll limits:', e);
+    } finally {
+      rollingLimits = false;
+    }
+  }
 
   async function loadMaxActiveSettings() {
     try {
@@ -104,6 +142,7 @@
   }
 
   async function saveMaxActiveSettings() {
+    if (isMaxActiveInvalid) return;
     try {
       await instanceActions.saveMaxActiveSettings(maxActiveSettings);
     } catch (e) {
@@ -645,7 +684,11 @@
                     type="number"
                     bind:value={maxActiveSettings.global_min_active}
                     min="1"
-                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium"
+                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium {Number(
+                      maxActiveSettings.global_min_active
+                    ) > Number(maxActiveSettings.global_max_active)
+                      ? 'border-stat-leecher text-stat-leecher'
+                      : ''}"
                     onchange={saveMaxActiveSettings}
                   />
                   <span>to</span>
@@ -653,11 +696,20 @@
                     type="number"
                     bind:value={maxActiveSettings.global_max_active}
                     min="1"
-                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium"
+                    class="w-16 h-8 px-2 border border-border rounded bg-background text-center font-medium {Number(
+                      maxActiveSettings.global_min_active
+                    ) > Number(maxActiveSettings.global_max_active)
+                      ? 'border-stat-leecher text-stat-leecher'
+                      : ''}"
                     onchange={saveMaxActiveSettings}
                   />
                   <span class="text-muted-foreground">active torrents</span>
                 </div>
+                {#if Number(maxActiveSettings.global_min_active) > Number(maxActiveSettings.global_max_active)}
+                  <p class="text-xs text-stat-leecher font-semibold">
+                    Error: Min active limit cannot be greater than Max active limit.
+                  </p>
+                {/if}
                 {#if maxActiveSettings.current_effective_global_limit != null}
                   <p class="text-xs text-primary font-medium">
                     Current effective limit: {maxActiveSettings.current_effective_global_limit} active
@@ -665,6 +717,18 @@
                   </p>
                 {/if}
               {/if}
+            </div>
+
+            <!-- Roll Button -->
+            <div class="mb-4 flex items-center justify-between">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={rollingLimits || isMaxActiveInvalid}
+                onclick={rollMaxActiveLimitsNow}
+              >
+                {rollingLimits ? 'Rolling...' : 'Roll & Apply Limit Now'}
+              </Button>
             </div>
 
             <!-- Per-Tracker Limits -->

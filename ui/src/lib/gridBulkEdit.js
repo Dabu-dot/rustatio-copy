@@ -8,6 +8,8 @@ export const BULK_EDIT_SECTIONS = [
   'randomization',
   'progressive',
   'stopConditions',
+  'startConditions',
+  'cyclicIntervals',
 ];
 
 export function isMixed(values) {
@@ -88,6 +90,21 @@ export function createBulkEditState(instances = []) {
     idleWhenNoSeeders: inst.idleWhenNoSeeders,
     postStopAction: inst.postStopAction,
   }));
+  const startConditions = getCommonSection(instances, inst => ({
+    startWhenLeechersAboveEnabled: inst.startWhenLeechersAboveEnabled,
+    startWhenLeechersAbove: inst.startWhenLeechersAbove,
+    startWhenSeedersAboveEnabled: inst.startWhenSeedersAboveEnabled,
+    startWhenSeedersAbove: inst.startWhenSeedersAbove,
+  }));
+  const cyclicIntervals = getCommonSection(instances, inst => ({
+    cyclicEnabled: inst.cyclicEnabled,
+    minActiveDurationHours: inst.minActiveDurationHours,
+    maxActiveDurationHours: inst.maxActiveDurationHours,
+    minInactiveDurationHours: inst.minInactiveDurationHours,
+    maxInactiveDurationHours: inst.maxInactiveDurationHours,
+    resetSessionCountersOnCycle: inst.resetSessionCountersOnCycle,
+    inactiveMode: inst.inactiveMode,
+  }));
 
   const sections = {
     client: { apply: false, ...client },
@@ -97,6 +114,8 @@ export function createBulkEditState(instances = []) {
     randomization: { apply: false, ...randomization },
     progressive: { apply: false, ...progressive },
     stopConditions: { apply: false, ...stopConditions },
+    startConditions: { apply: false, ...startConditions },
+    cyclicIntervals: { apply: false, ...cyclicIntervals },
   };
 
   return {
@@ -252,6 +271,72 @@ export function applyPresetToBulkState(state, preset) {
     };
   }
 
+  if (
+    settings.startWhenLeechersAboveEnabled != null ||
+    settings.startWhenLeechersAbove != null ||
+    settings.startWhenSeedersAboveEnabled != null ||
+    settings.startWhenSeedersAbove != null
+  ) {
+    next.sections.startConditions = next.sections.startConditions || {
+      apply: false,
+      mixed: false,
+      value: {},
+    };
+    next.sections.startConditions.apply = true;
+    next.sections.startConditions.value = {
+      ...next.sections.startConditions.value,
+      ...(settings.startWhenLeechersAboveEnabled != null
+        ? { startWhenLeechersAboveEnabled: settings.startWhenLeechersAboveEnabled }
+        : {}),
+      ...(settings.startWhenLeechersAbove != null
+        ? { startWhenLeechersAbove: settings.startWhenLeechersAbove }
+        : {}),
+      ...(settings.startWhenSeedersAboveEnabled != null
+        ? { startWhenSeedersAboveEnabled: settings.startWhenSeedersAboveEnabled }
+        : {}),
+      ...(settings.startWhenSeedersAbove != null
+        ? { startWhenSeedersAbove: settings.startWhenSeedersAbove }
+        : {}),
+    };
+  }
+
+  if (
+    settings.cyclicEnabled != null ||
+    settings.minActiveDurationHours != null ||
+    settings.maxActiveDurationHours != null ||
+    settings.minInactiveDurationHours != null ||
+    settings.maxInactiveDurationHours != null ||
+    settings.resetSessionCountersOnCycle != null ||
+    settings.inactiveMode != null
+  ) {
+    next.sections.cyclicIntervals = next.sections.cyclicIntervals || {
+      apply: false,
+      mixed: false,
+      value: {},
+    };
+    next.sections.cyclicIntervals.apply = true;
+    next.sections.cyclicIntervals.value = {
+      ...next.sections.cyclicIntervals.value,
+      ...(settings.cyclicEnabled != null ? { cyclicEnabled: settings.cyclicEnabled } : {}),
+      ...(settings.minActiveDurationHours != null
+        ? { minActiveDurationHours: settings.minActiveDurationHours }
+        : {}),
+      ...(settings.maxActiveDurationHours != null
+        ? { maxActiveDurationHours: settings.maxActiveDurationHours }
+        : {}),
+      ...(settings.minInactiveDurationHours != null
+        ? { minInactiveDurationHours: settings.minInactiveDurationHours }
+        : {}),
+      ...(settings.maxInactiveDurationHours != null
+        ? { maxInactiveDurationHours: settings.maxInactiveDurationHours }
+        : {}),
+      ...(settings.resetSessionCountersOnCycle != null
+        ? { resetSessionCountersOnCycle: settings.resetSessionCountersOnCycle }
+        : {}),
+      ...(settings.inactiveMode != null ? { inactiveMode: settings.inactiveMode } : {}),
+    };
+  }
+
   return next;
 }
 
@@ -289,6 +374,12 @@ export function mergeBulkSectionsIntoInstance(instance, sections) {
     if (ratioChanged) {
       merged.effectiveStopAtRatio = effectiveStopAtRatio ?? null;
     }
+  }
+  if (sections.startConditions?.apply) {
+    Object.assign(merged, sections.startConditions.value);
+  }
+  if (sections.cyclicIntervals?.apply) {
+    Object.assign(merged, sections.cyclicIntervals.value);
   }
 
   return merged;
