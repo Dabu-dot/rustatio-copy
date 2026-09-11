@@ -330,7 +330,8 @@ mod tests {
         };
 
         let json = serde_json::to_string(&preset).expect("preset serialization failed");
-        let restored: PresetSettings = serde_json::from_str(&json).expect("preset deserialization failed");
+        let restored: PresetSettings =
+            serde_json::from_str(&json).expect("preset deserialization failed");
 
         assert_eq!(restored.upload_rate, Some(150.0));
         assert_eq!(restored.stop_at_ratio, Some(2.5));

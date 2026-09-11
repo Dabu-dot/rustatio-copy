@@ -384,7 +384,8 @@ mod tests {
         };
 
         let json_str = serde_json::to_string(&state).expect("serialization failed");
-        let deserialized: PersistedState = serde_json::from_str(&json_str).expect("deserialization failed");
+        let deserialized: PersistedState =
+            serde_json::from_str(&json_str).expect("deserialization failed");
 
         assert_eq!(deserialized.version, 1);
         let restored_inst = deserialized.instances.get("inst-1").expect("instance missing");
