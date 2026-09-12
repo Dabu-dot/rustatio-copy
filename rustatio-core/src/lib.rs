@@ -26,6 +26,13 @@ pub use torrent::{
 };
 pub use validation::*;
 
+pub fn now_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 // Re-export reqwest::Client for downstream crates that need shared HTTP clients
 #[cfg(any(feature = "native", feature = "wasm"))]
 pub use reqwest;

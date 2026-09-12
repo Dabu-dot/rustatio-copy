@@ -71,6 +71,10 @@ pub struct PersistedRuntime {
     pub cyclic_next_switch_ms: Option<u64>,
     #[serde(default)]
     pub manually_stopped: bool,
+    #[serde(default)]
+    pub cooldown_until_ms: Option<u64>,
+    #[serde(default)]
+    pub active_until_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -330,6 +334,8 @@ mod tests {
             is_cyclic_inactive: false,
             cyclic_next_switch_ms: Some(1700000000000),
             manually_stopped: false,
+            cooldown_until_ms: None,
+            active_until_ms: None,
         };
 
         let instance = PersistedInstance {

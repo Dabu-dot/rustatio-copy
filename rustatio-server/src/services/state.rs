@@ -1103,6 +1103,8 @@ impl AppState {
             is_cyclic_inactive: stats.is_cyclic_inactive,
             cyclic_next_switch_ms: stats.cyclic_next_switch_ms,
             manually_stopped: stats.manually_stopped,
+            cooldown_until_ms: stats.cooldown_until_ms,
+            active_until_ms: stats.active_until_ms,
         }
     }
 
@@ -1154,6 +1156,8 @@ impl AppState {
             is_cyclic_inactive: runtime.is_cyclic_inactive,
             cyclic_next_switch_ms: runtime.cyclic_next_switch_ms,
             manually_stopped: runtime.manually_stopped,
+            cooldown_until_ms: runtime.cooldown_until_ms,
+            active_until_ms: runtime.active_until_ms,
         }
     }
 }

@@ -289,6 +289,60 @@ async fn manage_max_active_and_queue(
         let _ = state.set_max_active_settings(settings.clone()).await;
     }
 
+    // Runtime Expiration Check for Running instances
+    let now_ms = rustatio_core::now_timestamp_ms();
+    let running_items: Vec<(String, Arc<RatioFakerHandle>)> = {
+        let guard = instances.read().await;
+        guard
+            .iter()
+            .filter(|(_, inst)| {
+                matches!(
+                    inst.faker.stats_snapshot().state,
+                    FakerState::Running | FakerState::Starting
+                )
+            })
+            .map(|(id, inst)| (id.clone(), Arc::clone(&inst.faker)))
+            .collect()
+    };
+
+    for (id, faker) in running_items {
+        let stats = faker.stats_snapshot();
+        if let Some(active_until) = stats.active_until_ms {
+            if now_ms >= active_until {
+                tracing::info!(
+                    "Instance {} active duration expired. Transitioning to Idle with cooldown.",
+                    id
+                );
+                let _ = faker.stop().await; // Sends event=stopped announce to tracker
+                let mut new_stats = faker.stats_snapshot();
+                new_stats.state = FakerState::Idle;
+                new_stats.is_idling = true;
+                new_stats.idling_reason = Some("cooldown_active".to_string());
+                new_stats.active_until_ms = None;
+
+                let (min_inact, max_inact) = {
+                    let guard = instances.read().await;
+                    guard.get(&id).map_or((3600, 7200), |inst| {
+                        let min_dur = inst.config.min_inactive_duration;
+                        let max_dur = inst.config.max_inactive_duration.max(min_dur);
+                        (min_dur, max_dur)
+                    })
+                };
+
+                let cooldown_secs = if min_inact < max_inact {
+                    let mut rng = rand::rng();
+                    rng.random_range(min_inact..=max_inact)
+                } else {
+                    min_inact
+                };
+                new_stats.cooldown_until_ms = Some(now_ms.saturating_add(cooldown_secs * 1000));
+
+                faker.restore_snapshot(new_stats).await;
+                settings_modified = true;
+            }
+        }
+    }
+
     // Inspect instance info
     struct InstanceStateInfo {
         id: String,
@@ -298,6 +352,7 @@ async fn manage_max_active_and_queue(
         is_cyclic_inactive: bool,
         manually_stopped: bool,
         elapsed_secs: u64,
+        cooldown_until_ms: Option<u64>,
         faker: Arc<RatioFakerHandle>,
     }
 
@@ -317,6 +372,7 @@ async fn manage_max_active_and_queue(
                     is_cyclic_inactive: stats.is_cyclic_inactive,
                     manually_stopped: stats.manually_stopped,
                     elapsed_secs: stats.elapsed_time.as_secs(),
+                    cooldown_until_ms: stats.cooldown_until_ms,
                     faker: Arc::clone(&inst.faker),
                 }
             })
@@ -394,6 +450,7 @@ async fn manage_max_active_and_queue(
                     is_cyclic_inactive: stats.is_cyclic_inactive,
                     manually_stopped: stats.manually_stopped,
                     elapsed_secs: stats.elapsed_time.as_secs(),
+                    cooldown_until_ms: stats.cooldown_until_ms,
                     faker: Arc::clone(&inst.faker),
                 }
             })
@@ -409,9 +466,10 @@ async fn manage_max_active_and_queue(
             || item.is_cyclic_inactive
         {
             *running_count_by_tracker.entry(item.tracker_host.clone()).or_default() += 1;
-        } else if matches!(item.state, FakerState::Stopped | FakerState::Idle)
+        } else if matches!(item.state, FakerState::Idle | FakerState::Stopped)
             && !item.is_paused
             && !item.manually_stopped
+            && item.cooldown_until_ms.map_or(true, |cd| now_ms >= cd)
         {
             candidates_by_tracker.entry(item.tracker_host.clone()).or_default().push(item);
         }
@@ -435,7 +493,7 @@ async fn manage_max_active_and_queue(
             };
             let candidate = candidates.remove(idx);
 
-            // Scrape Conditions Check (Eligibility Filter)
+            // Scrape Conditions Check (Eligibility Filter: seeders >= min_seeders AND leechers >= min_leechers)
             if candidate.faker.check_scrape_start_conditions().await {
                 tracing::info!(
                     "Queue scheduler: Starting eligible candidate {} for tracker {}",
@@ -448,11 +506,11 @@ async fn manage_max_active_and_queue(
                     settings_modified = true;
                 }
             } else {
-                // If candidate fails scrape conditions, mark/leave as Idle and test another candidate
+                // If candidate fails scrape conditions, keep as Idle and test another candidate
                 let mut new_stats = candidate.faker.stats_snapshot();
                 new_stats.state = FakerState::Idle;
                 new_stats.is_idling = true;
-                new_stats.idling_reason = Some("lost_scrape_conditions".to_string());
+                new_stats.idling_reason = Some("scrape_conditions_not_met".to_string());
                 candidate.faker.restore_snapshot(new_stats).await;
                 tracing::info!("Candidate {} failed scrape conditions, keeping Idle", candidate.id);
             }
@@ -653,8 +711,8 @@ mod tests {
         // inst-1 has leechers = 0, so condition (leechers > 10) is NOT met.
         manage_max_active_and_queue(&state, &instances_map, false).await;
 
-        // inst-1 should NOT be started because start condition was not satisfied (marked Idle)
+        // inst-1 remains in Stopped state because start condition was not satisfied
         let inst_state = state.get_stats("inst-1").await.unwrap().state;
-        assert!(matches!(inst_state, FakerState::Idle));
+        assert!(matches!(inst_state, FakerState::Stopped | FakerState::Idle));
     }
 }

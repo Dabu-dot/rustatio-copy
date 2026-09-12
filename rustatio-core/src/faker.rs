@@ -477,6 +477,12 @@ pub struct FakerStats {
     #[serde(default)]
     pub manually_stopped: bool,
 
+    // === COOLDOWN & ACTIVE RUNTIME TIMERS ===
+    #[serde(default)]
+    pub cooldown_until_ms: Option<u64>,
+    #[serde(default)]
+    pub active_until_ms: Option<u64>,
+
     // === INTERNAL ===
     #[serde(skip)]
     pub last_announce: Option<Instant>,
@@ -825,6 +831,8 @@ impl RatioFaker {
             is_cyclic_inactive,
             cyclic_next_switch_ms,
             manually_stopped: false,
+            cooldown_until_ms: None,
+            active_until_ms: None,
         };
 
         Ok(Self {
@@ -865,15 +873,17 @@ impl RatioFaker {
         self.start_time = Instant::now();
         self.last_update = Instant::now();
 
+        let now_ms = Self::current_timestamp_millis();
+        let mut rng = rand::rng();
+        let min_act = self.config.min_active_duration;
+        let max_act = self.config.max_active_duration.max(min_act);
+        let active_dur =
+            if min_act < max_act { rng.random_range(min_act..=max_act) } else { min_act };
+        self.stats.active_until_ms = Some(now_ms.saturating_add(active_dur.saturating_mul(1000)));
+        self.stats.cooldown_until_ms = None;
+
         self.stats.is_cyclic_inactive = false;
         if self.config.cyclic_enabled {
-            let mut rng = rand::rng();
-            let active_dur = if self.config.min_active_duration < self.config.max_active_duration {
-                rng.random_range(self.config.min_active_duration..=self.config.max_active_duration)
-            } else {
-                self.config.min_active_duration
-            };
-            let now_ms = Self::current_timestamp_millis();
             self.cyclic_phase_start_ms = now_ms;
             self.cyclic_phase_duration_secs = active_dur;
             self.stats.cyclic_next_switch_ms =
@@ -1361,12 +1371,9 @@ impl RatioFaker {
                     scrape_response.incomplete
                 );
 
-                if self.check_scrape_start_conditions()
-                    && (self.stats.stop_condition_met
-                        || matches!(self.stats.state, FakerState::Stopped))
-                {
+                if self.check_scrape_start_conditions() && self.stats.stop_condition_met {
                     log_info!(
-                        "Scrape start condition met (seeders={}, leechers={}), starting/resuming torrent: {}",
+                        "Scrape start condition met (seeders={}, leechers={}), resuming torrent: {}",
                         self.stats.seeders,
                         self.stats.leechers,
                         self.torrent.name
@@ -1524,6 +1531,8 @@ impl RatioFaker {
             is_cyclic_inactive: false,
             cyclic_next_switch_ms: None,
             manually_stopped: false,
+            cooldown_until_ms: None,
+            active_until_ms: None,
         }
     }
 
@@ -1596,12 +1605,23 @@ impl RatioFaker {
     }
 
     fn build_announce_request(&self, event: TrackerEvent) -> AnnounceRequest {
+        // When state is Running and completion is 100% (or downloading is finished), left MUST be 0 to register as seeder on tracker
+        let left = if matches!(self.stats.state, FakerState::Running | FakerState::Starting)
+            && (self.config.completion_percent >= 100.0
+                || self.stats.torrent_completion >= 100.0
+                || self.stats.left == 0)
+        {
+            0
+        } else {
+            self.stats.left
+        };
+
         log_debug!(
             "Preparing announce: event={:?}, uploaded={}, downloaded={}, left={}",
             event,
             self.stats.uploaded,
             self.stats.downloaded,
-            self.stats.left
+            left
         );
 
         AnnounceRequest {
@@ -1610,7 +1630,7 @@ impl RatioFaker {
             port: self.config.port,
             uploaded: self.stats.uploaded,
             downloaded: self.stats.downloaded,
-            left: self.stats.left,
+            left,
             compact: true,
             no_peer_id: false,
             event,
@@ -1655,15 +1675,17 @@ impl RatioFaker {
             self.stats.next_announce = Some(now);
         }
 
+        let now_ms = Self::current_timestamp_millis();
+        let mut rng = rand::rng();
+        let min_act = self.config.min_active_duration;
+        let max_act = self.config.max_active_duration.max(min_act);
+        let active_dur =
+            if min_act < max_act { rng.random_range(min_act..=max_act) } else { min_act };
+        self.stats.active_until_ms = Some(now_ms.saturating_add(active_dur.saturating_mul(1000)));
+        self.stats.cooldown_until_ms = None;
+
         self.stats.is_cyclic_inactive = false;
         if self.config.cyclic_enabled {
-            let mut rng = rand::rng();
-            let active_dur = if self.config.min_active_duration < self.config.max_active_duration {
-                rng.random_range(self.config.min_active_duration..=self.config.max_active_duration)
-            } else {
-                self.config.min_active_duration
-            };
-            let now_ms = Self::current_timestamp_millis();
             self.cyclic_phase_start_ms = now_ms;
             self.cyclic_phase_duration_secs = active_dur;
             self.stats.cyclic_next_switch_ms =
